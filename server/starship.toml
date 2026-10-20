@@ -1,0 +1,91 @@
+"$schema" = 'https://starship.rs/config-schema.json'
+# EVA-02 remote prompt — same catppuccin powerline as local, but the leading
+# segment is plugsuit red with the host name so you always know you're remote.
+
+format = """
+[](fg:eva)\
+${env_var.EVA02_NAME}\
+[](bg:peach fg:eva)\
+$directory\
+[](bg:yellow fg:peach)\
+$git_branch\
+$git_status\
+[](fg:yellow bg:green)\
+$python\
+[](fg:green bg:sapphire)\
+$conda\
+${custom.gpu}\
+[](fg:sapphire bg:lavender)\
+$time\
+[ ](fg:lavender)\
+$cmd_duration\
+$line_break\
+$character"""
+
+palette = 'eva02'
+command_timeout = 1000
+
+# EVA02_NAME is exported by the bashrc snippet (defaults to the short hostname)
+[env_var.EVA02_NAME]
+style = "bg:eva fg:plug bold"
+format = '[ 󰢮 $env_value ]($style)'
+
+[directory]
+style = "bg:peach fg:crust"
+format = "[ $path ]($style)"
+truncation_length = 3
+truncation_symbol = "…/"
+
+[git_branch]
+symbol = ""
+style = "bg:yellow"
+format = '[[ $symbol $branch ](fg:crust bg:yellow)]($style)'
+
+[git_status]
+style = "bg:yellow"
+format = '[[($all_status$ahead_behind )](fg:crust bg:yellow)]($style)'
+
+[python]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version)(\(#$virtualenv\)) ](fg:crust bg:green)]($style)'
+
+[conda]
+symbol = "  "
+style = "fg:crust bg:sapphire"
+format = '[$symbol$environment ]($style)'
+ignore_base = false
+
+[custom.gpu]
+command = "~/.local/bin/eva02 seg prompt"
+when = true
+shell = ["bash", "--noprofile", "--norc"]
+style = "bg:sapphire fg:crust"
+format = '[ $output ]($style)'
+
+[time]
+disabled = false
+time_format = "%R"
+style = "bg:lavender"
+format = '[[  $time ](fg:crust bg:lavender)]($style)'
+
+[line_break]
+disabled = true
+
+[character]
+success_symbol = '[❯](bold fg:green)'
+error_symbol = '[❯](bold fg:eva)'
+
+[cmd_duration]
+show_milliseconds = true
+format = " in $duration "
+
+[palettes.eva02]
+eva = "#e62028"
+plug = "#f0ece8"
+peach = "#fab387"
+yellow = "#f9e2af"
+green = "#a6e3a1"
+sapphire = "#74c7ec"
+lavender = "#b4befe"
+crust = "#11111b"

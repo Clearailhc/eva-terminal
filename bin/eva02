@@ -1,0 +1,661 @@
+#!/usr/bin/env python3
+"""EVA-02 // MAGI remote link — GPU server banner and live monitor.
+
+  eva02            login banner (Asuka logo + host/GPU snapshot)
+  eva02 home [s]   the banner page, live-refreshing in place (q quit, +/- interval)
+  eva02 watch [s]  detailed live monitor: per-process rows, power, util history
+  eva02 seg MODE   one-line summary for prompt / tmux (MODE = prompt | tmux), cached
+"""
+import os
+import re
+import select
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import unicodedata
+
+HOME = os.path.expanduser("~")
+SHARE = os.environ.get("EVA02_SHARE") or os.path.join(HOME, ".local/share/eva02")
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "eva02")
+SEG_TTL = float(os.environ.get("EVA02_TTL", "10"))
+HOT_C = int(os.environ.get("EVA02_HOT", "80"))
+IDLE_UTIL, IDLE_MEM_MIB = 5, 1024
+DEMO = os.environ.get("EVA02_DEMO") == "1"  # fake 8-GPU data, for screenshots / trying it without a GPU
+
+# ── Unit-02 palette ──────────────────────────────────────────────
+def fg(r, g, b): return f"\x1b[38;2;{r};{g};{b}m"
+def bg(r, g, b): return f"\x1b[48;2;{r};{g};{b}m"
+RST, BOLD, DIM, REV = "\x1b[0m", "\x1b[1m", "\x1b[2m", "\x1b[7m"
+RED = fg(230, 32, 40)       # plugsuit red
+CRIM = fg(150, 10, 25)      # shadow red
+ORG = fg(255, 128, 0)       # warning orange
+AMB = fg(255, 190, 40)      # amber
+LIME = fg(150, 255, 60)     # status ok
+CYAN = fg(70, 210, 255)     # data
+WHT = fg(240, 236, 232)
+GRY = fg(130, 125, 135)
+DGRY = fg(70, 66, 76)
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def vlen(s):
+    w = 0
+    for ch in ANSI_RE.sub("", s):
+        w += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+    return w
+
+
+def pad(s, width):
+    return s + " " * max(0, width - vlen(s))
+
+
+def run(cmd, timeout=3):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+# ── data ─────────────────────────────────────────────────────────
+GPU_FIELDS = "index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,driver_version"
+
+
+def num(x, default=0.0):
+    try:
+        return float(x)
+    except ValueError:
+        return default
+
+
+def demo_gpus():
+    import math
+    t = time.time()
+    base = [97, 92, 88, 64, 41, 99, 0, 0]
+    gpus = []
+    for i, b in enumerate(base):
+        util = 0.0 if b == 0 else max(0.0, min(100.0, b + 6 * math.sin(t / 3 + i)))
+        mem = 0.0 if b == 0 else [71.2, 68.9, 70.4, 39.8, 22.5, 77.1][i] * 1024
+        gpus.append(dict(idx=i, uuid=f"GPU-demo-{i}", name="H100 80GB HBM3", util=util, mem=mem, memt=81559.0,
+                         temp=[71, 69, 68, 58, 49, 86, 33, 32][i], pw=[612, 590, 575, 402, 260, 640, 71, 69][i],
+                         pwl=700.0, drv="550.54.15", procs=[]))
+    who = [("asuka", "train", 15 * 3600), ("asuka", "train", 15 * 3600), ("shinji", "vllm.entrypoints", 4 * 3600),
+           ("shinji", "vllm.entrypoints", 4 * 3600), ("rei", "jupyter-lab", 1700), ("kaworu", "finetune_lora", 26 * 3600)]
+    for g, (user, name, et) in zip(gpus, who):
+        g["procs"].append(dict(pid=str(400100 + g["idx"]), user=user, et=et, name=name, mem=g["mem"]))
+    return gpus
+
+
+def query_gpus():
+    if DEMO:
+        return demo_gpus()
+    out = run(["nvidia-smi", f"--query-gpu={GPU_FIELDS}", "--format=csv,noheader,nounits"])
+    gpus = []
+    for line in out.strip().splitlines():
+        f = [x.strip() for x in line.split(",")]
+        if len(f) < 10:
+            continue
+        gpus.append(dict(idx=int(f[0]), uuid=f[1], name=f[2].replace("NVIDIA ", ""),
+                         util=num(f[3]), mem=num(f[4]), memt=num(f[5]), temp=num(f[6]),
+                         pw=num(f[7]), pwl=num(f[8]), drv=f[9], procs=[]))
+    return gpus
+
+
+def attach_procs(gpus):
+    if DEMO:
+        return
+    out = run(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory", "--format=csv,noheader,nounits"])
+    by_uuid = {g["uuid"]: g for g in gpus}
+    rows = []
+    for line in out.strip().splitlines():
+        f = [x.strip() for x in line.split(",")]
+        if len(f) == 3 and f[0] in by_uuid and f[1].isdigit():
+            rows.append((f[0], f[1], num(f[2])))
+    if not rows:
+        return
+    info = {}
+    ps = run(["ps", "-o", "pid=,user:32=,etimes=,args=", "-p", ",".join(sorted({r[1] for r in rows}))])
+    for line in ps.strip().splitlines():
+        p = line.split(None, 3)
+        if len(p) >= 3:
+            info[p[0]] = (p[1], int(p[2]), cmd_name(p[3] if len(p) > 3 else "?"))
+    for uuid, pid, mem in rows:
+        user, et, name = info.get(pid, ("?", 0, "?"))
+        by_uuid[uuid]["procs"].append(dict(pid=pid, user=user, et=et, name=name, mem=mem))
+
+
+def cmd_name(args):
+    """`python -m vllm.entrypoints...` → `vllm.entrypoints…`; `python train.py` → `train.py`."""
+    parts = args.split()
+    if not parts:
+        return "?"
+    base = os.path.basename(parts[0])
+    if base.startswith("python") and len(parts) > 1:
+        rest = [p for p in parts[1:] if not p.startswith("-")] or parts[1:]
+        if parts[1] == "-m" and len(parts) > 2:
+            return parts[2]
+        return os.path.basename(rest[0])
+    return base
+
+
+def clip(name, n):
+    name = name[:-3] if name.endswith(".py") else name
+    return name if len(name) <= n else name[: n - 1] + "…"
+
+
+def idle(g):
+    return g["util"] < IDLE_UTIL and g["mem"] < IDLE_MEM_MIB and not g["procs"]
+
+
+def fmt_et(s):
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m = s // 60
+    return f"{d}d{h:02d}h" if d else (f"{h}h{m:02d}m" if h else f"{m}m")
+
+
+def cuda_version():
+    if DEMO:
+        return "12.4"
+    os.makedirs(CACHE, exist_ok=True)
+    path = os.path.join(CACHE, "cuda")
+    try:
+        if time.time() - os.path.getmtime(path) < 86400:
+            return open(path).read().strip()
+    except OSError:
+        pass
+    m = re.search(r"CUDA Version:\s*([\d.]+)", run(["nvidia-smi"]))
+    v = m.group(1) if m else "?"
+    with open(path, "w") as f:
+        f.write(v)
+    return v
+
+
+def meminfo():
+    """GiB: used (total - available), total, page cache, swap used, swap total."""
+    d = {}
+    for line in open("/proc/meminfo"):
+        k, v = line.split(":")
+        d[k] = int(v.split()[0]) / 2**20
+    cache = d.get("Buffers", 0) + d.get("Cached", 0) + d.get("SReclaimable", 0)
+    return dict(used=d["MemTotal"] - d["MemAvailable"], total=d["MemTotal"], cache=cache,
+                swapu=d.get("SwapTotal", 0) - d.get("SwapFree", 0), swapt=d.get("SwapTotal", 0))
+
+
+_CPU_PREV = None
+
+
+def cpu_read():
+    d = {}
+    for line in open("/proc/stat"):
+        if not line.startswith("cpu"):
+            break
+        f = line.split()
+        v = [int(x) for x in f[1:9]]
+        d[f[0]] = (sum(v), v[3] + v[4])  # (total jiffies, idle + iowait)
+    return d
+
+
+def cpu_prime():
+    global _CPU_PREV
+    if _CPU_PREV is None:
+        _CPU_PREV = cpu_read()
+
+
+def cpu_usage():
+    """(overall %, [per-core %]) since the previous call or cpu_prime()."""
+    if DEMO:  # a 128-thread box: a busy block of dataloader workers, the rest light
+        import math
+        cores = [max(0.0, 85 + 12 * math.sin(i)) if 16 <= i < 48 else abs(18 * math.sin(i * 1.7)) for i in range(128)]
+        return sum(cores) / len(cores), cores
+    global _CPU_PREV
+    cur = cpu_read()
+    prev, _CPU_PREV = _CPU_PREV or {}, cur
+
+    def pct(k):
+        t0, i0 = prev.get(k, (0, 0))
+        dt, di = cur[k][0] - t0, cur[k][1] - i0
+        return 100.0 * (dt - di) / dt if dt > 0 else 0.0
+
+    cores = sorted((k for k in cur if k != "cpu"), key=lambda k: int(k[3:]))
+    return pct("cpu"), [pct(k) for k in cores]
+
+
+def mount_of(path):
+    path = os.path.realpath(path)
+    while not os.path.ismount(path):
+        path = os.path.dirname(path)
+    return path
+
+
+def uptime():
+    s = int(float(open("/proc/uptime").read().split()[0]))
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    pl = lambda n, w: f"{n} {w}{'' if n == 1 else 's'}"
+    return f"{pl(d, 'day')}, {pl(h, 'hour')}" if d else f"{pl(h, 'hour')}, {pl(s // 60, 'min')}"
+
+
+def os_name():
+    try:
+        for line in open("/etc/os-release"):
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "Linux"
+
+
+def disk(path):
+    try:
+        u = shutil.disk_usage(path)
+        return u.used / 2**30, u.total / 2**30
+    except OSError:
+        return 0, 0
+
+
+def tmux_sessions():
+    out = run(["tmux", "ls"], timeout=1)
+    return len(out.strip().splitlines()) if out.strip() else 0
+
+
+# ── widgets ──────────────────────────────────────────────────────
+def heat(pct):
+    if pct >= 90: return RED
+    if pct >= 60: return ORG
+    if pct >= 25: return AMB
+    return LIME
+
+
+TRACK = bg(48, 45, 56)
+
+
+def bar(pct, width, color=None):
+    """Smooth bar on a dark track, 1/8-cell resolution."""
+    pct = max(0.0, min(100.0, pct))
+    full = pct / 100 * width
+    n = int(full)
+    part = " ▏▎▍▌▋▊▉"[int((full - n) * 8)] if n < width else ""
+    return TRACK + (color or heat(pct)) + "█" * n + part + " " * (width - n - len(part)) + RST
+
+
+HEAT_STOPS = [(0, (48, 45, 56)), (10, (40, 110, 40)), (35, (150, 255, 60)),
+              (65, (255, 190, 40)), (85, (255, 128, 0)), (100, (230, 32, 40))]
+
+
+def heat_rgb(p):
+    p = max(0.0, min(100.0, p))
+    for (p0, c0), (p1, c1) in zip(HEAT_STOPS, HEAT_STOPS[1:]):
+        if p <= p1:
+            t = (p - p0) / (p1 - p0)
+            return tuple(round(a + (b - a) * t) for a, b in zip(c0, c1))
+    return HEAT_STOPS[-1][1]
+
+
+def core_map(vals, maxcells=45):
+    """Two rows of ▀ cells; each cell is two cores (top/bottom), coloured by load."""
+    cells = min(maxcells, max(1, -(-len(vals) // 4)))
+    k = cells * 4
+    if len(vals) > k:
+        n = len(vals)
+        vals = [sum(vals[i * n // k:(i + 1) * n // k]) / max(1, (i + 1) * n // k - i * n // k) for i in range(k)]
+    vals = list(vals) + [None] * (k - len(vals))
+    empty = (28, 27, 34)
+    rows = []
+    for r in range(2):
+        cellstr = []
+        for c in range(cells):
+            t, b = vals[(r * cells + c) * 2], vals[(r * cells + c) * 2 + 1]
+            tc = heat_rgb(t) if t is not None else empty
+            bc = heat_rgb(b) if b is not None else empty
+            cellstr.append(fg(*tc) + bg(*bc) + "▀")
+        rows.append("".join(cellstr) + RST)
+    return rows
+
+
+def spark(vals, width):
+    ticks = "▁▂▃▄▅▆▇█"
+    vals = list(vals)[-width:]
+    s = "".join(heat(v) + ticks[min(7, int(v / 100 * 7.999))] for v in vals)
+    return DGRY + "▁" * (width - len(vals)) + s + RST
+
+
+def temp_s(t):
+    if t >= HOT_C:
+        return f"{bg(200, 20, 30)}{WHT}{BOLD}⚠{t:>3.0f}°C{RST}"
+    return (ORG if t >= 70 else GRY) + f"{t:>4.0f}°C" + RST
+
+
+def stripes(c1, c2, n=4):
+    return "".join((c1 if i % 2 == 0 else c2) + "▰" for i in range(n)) + RST
+
+
+def section(title, tag, color=RED):
+    return f"{stripes(color, ORG)} {color}{title}{RST} {stripes(ORG, color)} {AMB}[{CYAN}{tag}{AMB}]{RST}"
+
+
+# ANSI-Shadow "EVA-02": █ in plugsuit red, box-drawing shadow in crimson
+BIG = [
+    "███████╗██╗   ██╗ █████╗        ██████╗ ██████╗ ",
+    "██╔════╝██║   ██║██╔══██╗      ██╔═████╗╚════██╗",
+    "█████╗  ██║   ██║███████║█████╗██║██╔██║ █████╔╝",
+    "██╔══╝  ╚██╗ ██╔╝██╔══██║╚════╝████╔╝██║██╔═══╝ ",
+    "███████╗ ╚████╔╝ ██║  ██║      ╚██████╔╝███████╗",
+    "╚══════╝  ╚═══╝  ╚═╝  ╚═╝       ╚═════╝ ╚══════╝",
+]
+
+
+def big_line(s):
+    out, cur = [], None
+    for ch in s:
+        c = RED if ch == "█" else CRIM
+        if c != cur:
+            out.append(c)
+            cur = c
+        out.append(ch)
+    return "".join(out) + RST
+
+
+def cage_name():
+    return os.environ.get("EVA02_NAME") or socket.gethostname().split(".")[0]
+
+
+def cage_ip():
+    conn = os.environ.get("SSH_CONNECTION", "").split()
+    return conn[2] if len(conn) >= 3 else ""
+
+
+W = 80  # info column width; every row below is laid out on the same grid
+
+
+def header(width=W):
+    user = os.environ.get("USER", "pilot")
+    side = [f"{AMB}PRODUCTION MODEL", f"{AMB}MAGI REMOTE LINK", "",
+            f"{ORG}PILOT {WHT}{user}", f"{ORG}CAGE  {WHT}{cage_name()}", f"{ORG}LINK  {GRY}{cage_ip()}"]
+    inner = width - 2
+    lines = [f"{RED}╔{'═' * inner}╗{RST}"]
+    for b, s in zip(BIG, side):
+        body = " " + big_line(b) + "  " + s + RST
+        lines.append(f"{RED}║{RST}{pad(body, inner)}{RED}║{RST}")
+    lines.append(f"{RED}╚{'═' * inner}╝{RST}")
+    return lines
+
+
+# grid: tag 5 │ SYNC 15 │ 2 │ VRAM 19 │ 2 │ TEMP 6 │ 2 │ PILOT 9 · PROCESS 12 · UP 5
+def gpu_row(g):
+    memp = g["mem"] / g["memt"] * 100 if g["memt"] else 0
+    util = f"{bar(g['util'], 10)} {heat(g['util'])}{g['util']:>3.0f}%{RST}"
+    vram = f"{bar(memp, 10, ORG if memp >= 90 else CYAN)} {WHT}{g['mem'] / 1024:>4.1f}{GRY}/{g['memt'] / 1024:.0f}G{RST}"
+    if idle(g):
+        who = f"{LIME}— STANDBY —{RST}"
+    elif g["procs"]:
+        p = max(g["procs"], key=lambda x: x["mem"])
+        extra = f"{GRY}+{len(g['procs']) - 1}{RST}" if len(g["procs"]) > 1 else ""
+        who = f"{CYAN}{p['user'][:9]:<9}{RST} {GRY}{clip(p['name'], 12):<12}{RST} {WHT}{fmt_et(p['et']):>5}{RST}{extra}"
+    else:
+        who = f"{GRY}(process hidden){RST}"
+    return f" {LIME}U-{g['idx']}{RST} {util}  {vram}  {temp_s(g['temp'])}  {who}"
+
+
+GPU_HEAD = f"{DGRY}{'':5}{'SYNC':<15}  {'LCL · VRAM':<19}  {'TEMP':>6}  {'PILOT':<9} {'PROCESS':<12} {'UP':>5}{RST}"
+
+
+def lcl_row(tag, pct, text):
+    return f" {AMB}{tag}{RST} {bar(pct, 10)} {heat(pct)}{pct:>3.0f}%{RST}  {text}"
+
+
+def magi_verdict(gpus):
+    hot = [g for g in gpus if g["temp"] >= HOT_C]
+    free = sum(idle(g) for g in gpus)
+    m = f"{LIME}MELCHIOR·1 ✓{RST}"
+    b = f"{LIME}BALTHASAR·2 ✓{RST}" if free else f"{ORG}BALTHASAR·2 ✗{RST}"
+    c = f"{LIME}CASPER·3 ✓{RST}" if not hot else f"{RED}CASPER·3 ✗{RST}"
+    if hot:
+        msg = f"{RED}{BOLD}PATTERN BLUE: UNIT-{','.join(str(g['idx']) for g in hot)} OVERHEAT{RST}"
+    elif not free:
+        msg = f"{ORG}ALL UNITS DEPLOYED — NO STANDBY{RST}"
+    else:
+        msg = f"{LIME}SYSTEMS NOMINAL{RST}"
+    return f"{m}  {b}  {c}", msg
+
+
+# ── banner ───────────────────────────────────────────────────────
+def banner():
+    sys.stdout.write("\n".join(banner_lines()) + RST + "\n")
+
+
+def banner_lines(interval=None, cols=None):
+    """The home page. With `interval` set it is a live frame: the footer shows clock and keys."""
+    cpu_prime()
+    gpus = query_gpus()
+    attach_procs(gpus)
+    record(gpus)
+    cpu, cores = cpu_usage()
+    m = meminfo()
+    du, dt = disk(HOME)
+    load1 = os.getloadavg()[0]
+    ncpu = os.cpu_count() or 1
+    if DEMO:
+        load1, ncpu = 38.0, len(cores)
+    free = sum(idle(g) for g in gpus)
+
+    right = header()
+    right.append(section("CENTRAL DOGMA", "HOST"))
+    right.append(f" {LIME}OS{RST}      {WHT}{os_name()} · {os.uname().release}{RST}")
+    drv = f"{LIME}DRIVER{RST}  {WHT}{gpus[0]['drv']} · CUDA {cuda_version()}{RST}" if gpus else ""
+    right.append(f" {LIME}UPTIME{RST}  {WHT}{uptime():<20}{RST}{drv}")
+
+    if gpus:
+        names = "/".join(sorted({g["name"] for g in gpus}))
+        used, tot = sum(g["mem"] for g in gpus) / 1024, sum(g["memt"] for g in gpus) / 1024
+        pw = sum(g["pw"] for g in gpus)
+        right.append(section("EVA UNITS", "GPU") +
+                     f"  {LIME if free else ORG}{BOLD}{free}/{len(gpus)} STANDBY{RST}"
+                     f"  {GRY}{len(gpus)}× {names} · Σ {WHT}{used:.0f}{GRY}/{tot:.0f}G · {WHT}{pw / 1000:.1f}{GRY}kW{RST}")
+        right.append(GPU_HEAD)
+        right += [gpu_row(g) for g in gpus]
+    else:
+        right.append(section("EVA UNITS", "GPU") + f"  {RED}nvidia-smi unavailable{RST}")
+
+    right.append(section("WARNING", "LCL", ORG))
+    cm = core_map(cores)
+    right.append(lcl_row("CPU", cpu, cm[0]))
+    right.append(f"{'':5}{GRY}{f'{ncpu}T · load {load1:.0f}':<15}{RST}  {cm[1]}")
+    memp = m["used"] / m["total"] * 100
+    swap = f" · swap {m['swapu']:.0f}/{m['swapt']:.0f}G" if m["swapt"] else ""
+    right.append(lcl_row("MEM", memp, f"{WHT}{m['used']:.0f}{GRY}/{m['total']:.0f}G{RST}"
+                                      f"  {GRY}cache {m['cache']:.0f}G{swap}{RST}"))
+    dp = du / dt * 100 if dt else 0
+    right.append(lcl_row("DSK", dp, f"{WHT}{du:.0f}{GRY}/{dt:.0f}G{RST}  {GRY}{mount_of(HOME)}{RST}" +
+                         (f"  {RED}{BOLD}⚠ ENTRY-PLUG NEARLY FULL{RST}" if dp >= 90 else "")))
+
+    votes, msg = magi_verdict(gpus)
+    right.append(f" {votes}   {msg}")
+    ts = tmux_sessions()
+    tmux = f" {GRY}tmux{RST} {AMB}{ts} session{'s' if ts != 1 else ''}{RST}"
+    if interval is None:
+        right.append(tmux + f"   {GRY}live{RST} {CYAN}eva{RST} {GRY}/{RST} {CYAN}asuka{RST}"
+                     f"   {ORG}惣流・アスカ {GRY}— {AMB}Anta baka?{RST}")
+    else:
+        right.append(tmux + f"   {LIME}●{RST} {WHT}{time.strftime('%H:%M:%S')}{RST}"
+                     f" {GRY}every {interval:g}s · +/- interval · d detail · q quit{RST}")
+    # largest Asuka that fits beside the info column; none if the terminal is too narrow
+    cols = cols or shutil.get_terminal_size((160, 40)).columns
+    room = cols - 2 - max(W, max(vlen(r) for r in right))
+    logo = []
+    for w in (50, 44, 40, 32, 26):
+        lp = os.path.join(SHARE, f"avatar-{w}.ans")
+        if w <= room and os.path.exists(lp):
+            logo = open(lp).read().rstrip("\n").split("\n")
+            break
+    lw = max((vlen(l) for l in logo), default=0)
+    out = []
+    for i in range(max(len(logo), len(right))):
+        left = logo[i] if i < len(logo) else " " * lw
+        r = right[i] if i < len(right) else ""
+        out.append((pad(left, lw) + RST + "  " if logo else "") + r)
+    return out
+
+
+# ── live monitor ─────────────────────────────────────────────────
+def live(interval, frame, views=None):
+    """Redraw frame(interval, cols) in place on the alternate screen until q.
+
+    views maps a key to another frame function to switch to (default: d detail / h home).
+    """
+    views = {"d": detail_frame, "h": home_frame} if views is None else views
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    w = sys.stdout.write
+    w("\x1b[?1049h\x1b[?25l")
+    try:
+        tty.setcbreak(fd)
+        while True:
+            t0 = time.time()
+            cols, rows = shutil.get_terminal_size((120, 40))
+            lines = frame(interval, cols)
+            if len(lines) > rows - 1:  # too short: keep the footer (clock + keys) visible
+                lines = lines[: rows - 2] + lines[-1:]
+            w("\x1b[H" + "".join(l + RST + "\x1b[K\n" for l in lines[: rows - 1]) + "\x1b[J")
+            sys.stdout.flush()
+            deadline = t0 + interval
+            while True:
+                left = deadline - time.time()
+                if left <= 0:
+                    break
+                r, _, _ = select.select([sys.stdin], [], [], left)
+                if not r:
+                    break
+                ch = sys.stdin.read(1)
+                if ch in ("q", "Q", "\x1b"):
+                    return
+                if ch in ("+", "="):
+                    interval = min(10.0, interval * 2)
+                    break
+                if ch in ("-", "_"):
+                    interval = max(0.5, interval / 2)
+                    break
+                if ch in views:
+                    frame = views[ch]
+                    w("\x1b[2J")
+                    break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        w("\x1b[?25h\x1b[?1049l")
+        sys.stdout.flush()
+
+
+HIST = {}
+
+
+def home_frame(interval, cols):
+    return banner_lines(interval, cols)
+
+
+def record(gpus):
+    for g in gpus:
+        HIST.setdefault(g["idx"], []).append(g["util"])
+        HIST[g["idx"]] = HIST[g["idx"]][-120:]
+
+
+def detail_frame(interval, cols):
+    gpus = query_gpus()
+    attach_procs(gpus)
+    record(gpus)
+    return watch_frame(gpus, HIST, interval, cols)
+
+
+def watch_frame(gpus, hist, interval, cols):
+    free = sum(idle(g) for g in gpus)
+    host = cage_name()
+    sw = max(10, min(40, cols - 96))
+    L = [f"{bg(200, 20, 30)}{WHT}{BOLD} EVA-02 {RST}{bg(60, 10, 15)}{AMB} MAGI LIVE MONITOR {RST}"
+         f"  {WHT}{host}{RST}  {GRY}{time.strftime('%Y-%m-%d %H:%M:%S')}{RST}"
+         f"  {LIME if free else ORG}{free}/{len(gpus)} STANDBY{RST}"
+         f"  {GRY}every {interval:g}s · +/- interval · h home · q quit{RST}", ""]
+    cpu_prime()
+    for g in gpus:
+        memp = g["mem"] / g["memt"] * 100 if g["memt"] else 0
+        L.append(f" {LIME}{BOLD}UNIT-{g['idx']}{RST}"
+                 f"  {GRY}SYNC{RST} {bar(g['util'], 16)} {heat(g['util'])}{g['util']:>3.0f}%{RST}"
+                 f"  {GRY}LCL{RST} {bar(memp, 12, CYAN)} {WHT}{g['mem'] / 1024:>4.1f}{GRY}/{g['memt'] / 1024:.0f}G{RST}"
+                 f" {temp_s(g['temp'])} {GRY}{g['pw']:>4.0f}/{g['pwl']:.0f}W{RST}"
+                 f"  {spark(hist.get(g['idx'], []), sw)}")
+        if idle(g):
+            L.append(f"   {DGRY}└{RST} {LIME}STANDBY{RST}")
+        else:
+            procs = sorted(g["procs"], key=lambda p: -p["mem"])
+            items = [f"{CYAN}{p['user'][:12]}{RST} {GRY}{p['name'][:22]}{RST} {DGRY}pid{RST} {GRY}{p['pid']}{RST}"
+                     f" {WHT}{p['mem'] / 1024:.1f}G{RST} {AMB}{fmt_et(p['et'])}{RST}" for p in procs[:2]]
+            more = f" {GRY}+{len(procs) - 2} more{RST}" if len(procs) > 2 else ""
+            L.append(f"   {DGRY}└{RST} " + f"  {DGRY}│{RST} ".join(items or [f"{GRY}(process hidden){RST}"]) + more)
+    m = meminfo()
+    cpu, cores = cpu_usage()
+    load1, load5, _ = os.getloadavg()
+    ncpu = os.cpu_count() or 1
+    cm = core_map(cores)
+    L.append("")
+    L.append(f" {AMB}CPU{RST}  {bar(cpu, 16)} {heat(cpu)}{cpu:>3.0f}%{RST}  {cm[0]}"
+             f"  {AMB}MEM{RST} {bar(m['used'] / m['total'] * 100, 16)} {WHT}{m['used']:.0f}/{m['total']:.0f}G{RST}")
+    L.append(f"      {GRY}{f'{ncpu}T · load {load1:.0f}/{load5:.0f}':<21}{RST}  {cm[1]}")
+    votes, msg = magi_verdict(gpus)
+    L.append(f" {votes}   {msg}")
+    return L
+
+
+# ── prompt / tmux segment ────────────────────────────────────────
+def seg(mode):
+    os.makedirs(CACHE, exist_ok=True)
+    path = os.path.join(CACHE, "seg.csv")
+    try:
+        fresh = time.time() - os.path.getmtime(path) < SEG_TTL
+    except OSError:
+        fresh = False
+    if not fresh:
+        out = run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,temperature.gpu",
+                   "--format=csv,noheader,nounits"], timeout=2)
+        if out.strip():
+            tmp = f"{path}.{os.getpid()}"
+            with open(tmp, "w") as f:
+                f.write(out)
+            os.replace(tmp, path)
+    try:
+        rows = [[num(x) for x in l.split(",")] for l in open(path).read().strip().splitlines()]
+    except OSError:
+        return
+    if not rows:
+        return
+    free = sum(1 for u, m, _ in rows if u < IDLE_UTIL and m < IDLE_MEM_MIB)
+    avg = sum(r[0] for r in rows) / len(rows)
+    hot = [str(i) for i, r in enumerate(rows) if r[2] >= HOT_C]
+    if mode == "tmux":
+        s = f"#[fg=#e62028,bold]{cage_name()} #[default]"
+        s += (f"#[fg=#96ff3c]" if free else "#[fg=#ff8000]") + f"▣ {free}/{len(rows)} free "
+        s += f"#[fg=#827d87]· util #[fg=#f0ece8]{avg:.0f}% "
+        if hot:
+            s += f"#[fg=#f0ece8,bg=#c8141e,bold] ⚠ GPU{','.join(hot)} HOT #[default]"
+        print(s)
+    else:
+        print(f"▣ {free}/{len(rows)}" + (f" ⚠{','.join(hot)}" if hot else ""))
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] == "banner":
+        banner()
+    elif a[0] in ("home", "watch"):
+        live(float(a[1]) if len(a) > 1 else 1.0, home_frame if a[0] == "home" else detail_frame)
+    elif a[0] == "seg":
+        seg(a[1] if len(a) > 1 else "prompt")
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main()
