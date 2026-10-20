@@ -18,7 +18,40 @@ Every unit works with both layouts; it changes colours, lettering, pilot and quo
 
 ![units](docs/units.png)
 
-![EVA-01, Mark.06 and EVA-08 on the server layout](docs/units-server.png)
+#### `00` · EVA-00 — Rei Ayanami · *"I am not a doll. I am me."*
+![EVA-00 on the server layout](docs/units/server-00.png)
+
+#### `01` · EVA-01 — Shinji Ikari · *"I mustn't run away."*
+![EVA-01 on the server layout](docs/units/server-01.png)
+
+#### `02` · EVA-02 — Asuka Langley Soryu · *"Anta baka?"*
+![EVA-02 on the server layout](docs/units/server-02.png)
+
+#### `06` · Mark.06 — Kaworu Nagisa · *"Song is good."*
+![Mark.06 on the server layout](docs/units/server-06.png)
+
+#### `08` · EVA-08 — Mari Makinami · *"Hello, puppy-kun!"*
+![EVA-08 on the server layout](docs/units/server-08.png)
+
+<details>
+<summary><b>The same five units on the local layout</b></summary>
+
+#### `00` · EVA-00 · NERV
+![EVA-00 on the local layout](docs/units/local-00.png)
+
+#### `01` · EVA-01 · NERV
+![EVA-01 on the local layout](docs/units/local-01.png)
+
+#### `02` · EVA-02 · NERV
+![EVA-02 on the local layout](docs/units/local-02.png)
+
+#### `06` · Mark.06 · SEELE
+![Mark.06 on the local layout](docs/units/local-06.png)
+
+#### `08` · EVA-08 · WILLE
+![EVA-08 on the local layout](docs/units/local-08.png)
+
+</details>
 
 Switch any time with `EVA_UNIT=01 eva`, or install with a unit (below). Default: EVA-02 on servers, EVA-00 locally. Every unit ships with an avatar of its pilot; swap in your own any time ([own avatar](#use-your-own-avatar)).
 
@@ -101,7 +134,7 @@ EVA 主题的 Linux 终端面板，两种布局，五台机体可选：零号机
 - **服务器布局**（默认二号机）：给共享 GPU 服务器用。登录横幅显示每张卡的算力和显存条、温度、谁在跑什么任务、跑了多久，加上 CPU 核心热力图、内存和磁盘。`eva` 打开实时刷新版，`magi` 打开详细面板。GPU 过热、没有空闲卡、磁盘快满时，MAGI 会给出告警。配套 starship prompt（机体颜色的主机徽标 + 空闲 GPU 数）和 tmux 状态栏。
 - **本机布局**（默认零号机）：给自己的电脑用。保留 NERV 风格，实时显示 CPU 占用、每个核的负载、温度、风扇、核显频率、内存、磁盘、电池功耗和剩余时间、网络。`eva` / `rei` 打开实时版。
 
-机体只改变配色、大标题、驾驶员和台词，不影响显示的数据；告警颜色在所有机体里都一样。`bin/eva02 units` 查看全部机体，`EVA_UNIT=01 eva` 临时切换。
+机体只改变配色、大标题、驾驶员和台词，不影响显示的数据；告警颜色在所有机体里都一样。`bin/eva02 units` 查看全部机体，`EVA_UNIT=01 eva` 临时切换。五台机体的效果见上方 [Units](#units)。
 
 纯 Python 标准库实现，不需要 root。
 
