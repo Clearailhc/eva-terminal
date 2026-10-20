@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""EVA-02 // MAGI remote link — GPU server banner and live monitor.
+"""MAGI remote link — GPU server banner and live monitor (default unit: EVA-02).
 
-  eva02            login banner (Asuka logo + host/GPU snapshot)
+  eva02            login banner (avatar + host/GPU snapshot)
   eva02 home [s]   the banner page, live-refreshing in place (q quit, +/- interval)
   eva02 watch [s]  detailed live monitor: per-process rows, power, util history
   eva02 seg MODE   one-line summary for prompt / tmux (MODE = prompt | tmux), cached
+  eva02 units      list the available units (themes)
+  eva02 template   fill @@role@@ / @@unit@@ placeholders in a config read from stdin
+
+EVA_UNIT=01|02|00|06|08 picks the unit; it only changes looks, never the data shown.
 """
 import os
 import re
@@ -17,26 +21,132 @@ import time
 import unicodedata
 
 HOME = os.path.expanduser("~")
-SHARE = os.environ.get("EVA02_SHARE") or os.path.join(HOME, ".local/share/eva02")
+AVATARS = os.environ.get("EVA_AVATARS") or os.path.join(HOME, ".local/share/eva-terminal/units")
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "eva02")
 SEG_TTL = float(os.environ.get("EVA02_TTL", "10"))
 HOT_C = int(os.environ.get("EVA02_HOT", "80"))
 IDLE_UTIL, IDLE_MEM_MIB = 5, 1024
 DEMO = os.environ.get("EVA02_DEMO") == "1"  # fake 8-GPU data, for screenshots / trying it without a GPU
 
-# ── Unit-02 palette ──────────────────────────────────────────────
+# ── semantic colours: the same for every unit, so alerts always read the same ─
 def fg(r, g, b): return f"\x1b[38;2;{r};{g};{b}m"
 def bg(r, g, b): return f"\x1b[48;2;{r};{g};{b}m"
 RST, BOLD, DIM, REV = "\x1b[0m", "\x1b[1m", "\x1b[2m", "\x1b[7m"
-RED = fg(230, 32, 40)       # plugsuit red
-CRIM = fg(150, 10, 25)      # shadow red
-ORG = fg(255, 128, 0)       # warning orange
-AMB = fg(255, 190, 40)      # amber
-LIME = fg(150, 255, 60)     # status ok
-CYAN = fg(70, 210, 255)     # data
+RED = fg(230, 32, 40)       # critical / overheat
+ORG = fg(255, 128, 0)       # high
+AMB = fg(255, 190, 40)      # medium
+LIME = fg(150, 255, 60)     # ok / standby
 WHT = fg(240, 236, 232)
 GRY = fg(130, 125, 135)
 DGRY = fg(70, 66, 76)
+
+# ── units (themes) ───────────────────────────────────────────────
+# Palette roles: main = big lettering, shadow = its box-drawing shadow, frame = borders,
+# alt / alt2 = secondary accents and section stripes, side = labels, key = row keys,
+# data = highlighted values (users, VRAM bars, tags).
+ROLES = ("main", "shadow", "frame", "alt", "alt2", "side", "key", "data")
+UNITS = {
+    "00": dict(unit="EVA-00", tag="UNIT-00", org="NERV", model="PROTOTYPE", pilot="REI AYANAMI",
+               child="FIRST CHILD", jp="綾波レイ", quote="I am not a doll. I am me.",
+               main=(0, 255, 0), shadow=(0, 120, 40), frame=(255, 0, 0), alt=(255, 135, 0), alt2=(215, 95, 0),
+               side=(255, 215, 0), key=(0, 255, 0), data=(0, 255, 255)),
+    "01": dict(unit="EVA-01", tag="UNIT-01", org="NERV", model="TEST TYPE", pilot="SHINJI IKARI",
+               child="THIRD CHILD", jp="碇シンジ", quote="I mustn't run away.",
+               main=(150, 90, 235), shadow=(70, 40, 125), frame=(150, 90, 235), alt=(155, 227, 74), alt2=(95, 160, 40),
+               side=(255, 138, 31), key=(155, 227, 74), data=(205, 180, 255)),
+    "02": dict(unit="EVA-02", tag="UNIT-02", org="NERV", model="PRODUCTION MODEL", pilot="ASUKA LANGLEY SORYU",
+               child="SECOND CHILD", jp="惣流・アスカ", quote="Anta baka?",
+               main=(230, 32, 40), shadow=(150, 10, 25), frame=(230, 32, 40), alt=(255, 128, 0), alt2=(190, 80, 0),
+               side=(255, 190, 40), key=(150, 255, 60), data=(70, 210, 255)),
+    "06": dict(unit="MARK.06", tag="MARK.06", org="SEELE", model="SEELE UNIT", pilot="KAWORU NAGISA",
+               child="FIFTH CHILD", jp="渚カヲル", quote="Song is good.",
+               main=(80, 130, 245), shadow=(30, 50, 120), frame=(80, 130, 245), alt=(232, 236, 245), alt2=(150, 160, 185),
+               side=(150, 190, 255), key=(232, 236, 245), data=(130, 220, 255)),
+    "08": dict(unit="EVA-08", tag="UNIT-08", org="WILLE", model="WILLE UNIT", pilot="MARI MAKINAMI",
+               child="EURO PILOT", jp="真希波・マリ", quote="Hello, puppy-kun!",
+               main=(255, 79, 163), shadow=(130, 30, 80), frame=(255, 79, 163), alt=(46, 230, 168), alt2=(25, 150, 110),
+               side=(245, 235, 255), key=(46, 230, 168), data=(255, 170, 215)),
+}
+
+
+class T:
+    """The active unit: ANSI strings for each palette role plus its words. Set by use_unit()."""
+
+
+def unit_code(s):
+    """'1', '01', 'EVA-01', 'mark.06' → '01' / '06'; None if it names no known unit."""
+    d = re.sub(r"\D", "", str(s or ""))
+    return d.zfill(2) if d and d.zfill(2) in UNITS else None
+
+
+def use_unit(code, default="02"):
+    T.code = unit_code(code) or default
+    u = UNITS[T.code]
+    for k, v in u.items():
+        setattr(T, k, fg(*v) if k in ROLES else v)
+    T.rgb = {k: u[k] for k in ROLES}
+    T.rgb["dark"] = tuple(c // 4 for c in u["frame"])   # badge / tmux session background
+    T.rgb["deep"] = tuple(c // 9 for c in u["frame"])   # tmux status bar background
+    T.bg_main, T.bg_dark = bg(*u["frame"]), bg(*T.rgb["dark"])
+    T.hex = lambda role: "#%02x%02x%02x" % T.rgb[role]
+
+
+use_unit(os.environ.get("EVA_UNIT"))
+
+# ANSI Shadow lettering for the unit / organisation names
+FONT = {
+    "A": [" █████╗ ", "██╔══██╗", "███████║", "██╔══██║", "██║  ██║", "╚═╝  ╚═╝"],
+    "E": ["███████╗", "██╔════╝", "█████╗  ", "██╔══╝  ", "███████╗", "╚══════╝"],
+    "I": ["██╗", "██║", "██║", "██║", "██║", "╚═╝"],
+    "K": ["██╗  ██╗", "██║ ██╔╝", "█████╔╝ ", "██╔═██╗ ", "██║  ██╗", "╚═╝  ╚═╝"],
+    "L": ["██╗     ", "██║     ", "██║     ", "██║     ", "███████╗", "╚══════╝"],
+    "M": ["███╗   ███╗", "████╗ ████║", "██╔████╔██║", "██║╚██╔╝██║", "██║ ╚═╝ ██║", "╚═╝     ╚═╝"],
+    "N": ["███╗   ██╗", "████╗  ██║", "██╔██╗ ██║", "██║╚██╗██║", "██║ ╚████║", "╚═╝  ╚═══╝"],
+    "R": ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔══██╗", "██║  ██║", "╚═╝  ╚═╝"],
+    "S": ["███████╗", "██╔════╝", "███████╗", "╚════██║", "███████║", "╚══════╝"],
+    "V": ["██╗   ██╗", "██║   ██║", "██║   ██║", "╚██╗ ██╔╝", " ╚████╔╝ ", "  ╚═══╝  "],
+    "W": ["██╗    ██╗", "██║    ██║", "██║ █╗ ██║", "██║███╗██║", "╚███╔███╔╝", " ╚══╝╚══╝ "],
+    "0": [" ██████╗ ", "██╔═████╗", "██║██╔██║", "████╔╝██║", "╚██████╔╝", " ╚═════╝ "],
+    "1": [" ██╗", "███║", "╚██║", " ██║", " ██║", " ╚═╝"],
+    "2": ["██████╗ ", "╚════██╗", " █████╔╝", "██╔═══╝ ", "███████╗", "╚══════╝"],
+    "6": [" ██████╗ ", "██╔════╝ ", "███████╗ ", "██╔═══██╗", "╚██████╔╝", " ╚═════╝ "],
+    "8": [" █████╗ ", "██╔══██╗", "╚█████╔╝", "██╔══██╗", "╚█████╔╝", " ╚════╝ "],
+    "-": ["      ", "      ", "█████╗", "╚════╝", "      ", "      "],
+    ".": ["   ", "   ", "   ", "   ", "██╗", "╚═╝"],
+}
+
+
+def big(text):
+    rows = [""] * 6
+    for ch in text.upper():
+        glyph = FONT[ch]
+        w = max(len(r) for r in glyph)
+        for i in range(6):
+            rows[i] += glyph[i].ljust(w)
+    return rows
+
+
+AVATAR_SIZES = (50, 44, 40, 32, 26)
+
+
+def avatar_lines(room):
+    """Largest avatar of the active unit that fits in `room` columns; [] if none fits or exists."""
+    for w in AVATAR_SIZES:
+        path = os.path.join(AVATARS, T.code, f"avatar-{w}.ans")
+        if w <= room and os.path.exists(path):
+            return open(path).read().rstrip("\n").split("\n")
+    return []
+
+
+def beside(logo, right):
+    """Put the avatar to the left of the info column."""
+    lw = max((vlen(l) for l in logo), default=0)
+    out = []
+    for i in range(max(len(logo), len(right))):
+        left = logo[i] if i < len(logo) else " " * lw
+        r = right[i] if i < len(right) else ""
+        out.append((pad(left, lw) + RST + "  " if logo else "") + r)
+    return out
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -332,25 +442,16 @@ def stripes(c1, c2, n=4):
     return "".join((c1 if i % 2 == 0 else c2) + "▰" for i in range(n)) + RST
 
 
-def section(title, tag, color=RED):
-    return f"{stripes(color, ORG)} {color}{title}{RST} {stripes(ORG, color)} {AMB}[{CYAN}{tag}{AMB}]{RST}"
-
-
-# ANSI-Shadow "EVA-02": █ in plugsuit red, box-drawing shadow in crimson
-BIG = [
-    "███████╗██╗   ██╗ █████╗        ██████╗ ██████╗ ",
-    "██╔════╝██║   ██║██╔══██╗      ██╔═████╗╚════██╗",
-    "█████╗  ██║   ██║███████║█████╗██║██╔██║ █████╔╝",
-    "██╔══╝  ╚██╗ ██╔╝██╔══██║╚════╝████╔╝██║██╔═══╝ ",
-    "███████╗ ╚████╔╝ ██║  ██║      ╚██████╔╝███████╗",
-    "╚══════╝  ╚═══╝  ╚═╝  ╚═╝       ╚═════╝ ╚══════╝",
-]
+def section(title, tag, color=None):
+    c = color or T.main
+    return f"{stripes(c, T.alt)} {c}{title}{RST} {stripes(T.alt, c)} {T.side}[{T.data}{tag}{T.side}]{RST}"
 
 
 def big_line(s):
+    """Unit lettering: solid blocks in the main colour, box-drawing shadow in the shadow colour."""
     out, cur = [], None
     for ch in s:
-        c = RED if ch == "█" else CRIM
+        c = T.main if ch == "█" else T.shadow
         if c != cur:
             out.append(c)
             cur = c
@@ -372,14 +473,14 @@ W = 80  # info column width; every row below is laid out on the same grid
 
 def header(width=W):
     user = os.environ.get("USER", "pilot")
-    side = [f"{AMB}PRODUCTION MODEL", f"{AMB}MAGI REMOTE LINK", "",
-            f"{ORG}PILOT {WHT}{user}", f"{ORG}CAGE  {WHT}{cage_name()}", f"{ORG}LINK  {GRY}{cage_ip()}"]
+    side = [f"{T.side}{T.model}", f"{T.side}MAGI REMOTE LINK", "",
+            f"{T.alt}PILOT {WHT}{user}", f"{T.alt}CAGE  {WHT}{cage_name()}", f"{T.alt}LINK  {GRY}{cage_ip()}"]
     inner = width - 2
-    lines = [f"{RED}╔{'═' * inner}╗{RST}"]
-    for b, s in zip(BIG, side):
+    lines = [f"{T.frame}╔{'═' * inner}╗{RST}"]
+    for b, s in zip(big(T.unit), side):
         body = " " + big_line(b) + "  " + s + RST
-        lines.append(f"{RED}║{RST}{pad(body, inner)}{RED}║{RST}")
-    lines.append(f"{RED}╚{'═' * inner}╝{RST}")
+        lines.append(f"{T.frame}║{RST}{pad(body, inner)}{T.frame}║{RST}")
+    lines.append(f"{T.frame}╚{'═' * inner}╝{RST}")
     return lines
 
 
@@ -387,23 +488,23 @@ def header(width=W):
 def gpu_row(g):
     memp = g["mem"] / g["memt"] * 100 if g["memt"] else 0
     util = f"{bar(g['util'], 10)} {heat(g['util'])}{g['util']:>3.0f}%{RST}"
-    vram = f"{bar(memp, 10, ORG if memp >= 90 else CYAN)} {WHT}{g['mem'] / 1024:>4.1f}{GRY}/{g['memt'] / 1024:.0f}G{RST}"
+    vram = f"{bar(memp, 10, ORG if memp >= 90 else T.data)} {WHT}{g['mem'] / 1024:>4.1f}{GRY}/{g['memt'] / 1024:.0f}G{RST}"
     if idle(g):
         who = f"{LIME}— STANDBY —{RST}"
     elif g["procs"]:
         p = max(g["procs"], key=lambda x: x["mem"])
         extra = f"{GRY}+{len(g['procs']) - 1}{RST}" if len(g["procs"]) > 1 else ""
-        who = f"{CYAN}{p['user'][:9]:<9}{RST} {GRY}{clip(p['name'], 12):<12}{RST} {WHT}{fmt_et(p['et']):>5}{RST}{extra}"
+        who = f"{T.data}{p['user'][:9]:<9}{RST} {GRY}{clip(p['name'], 12):<12}{RST} {WHT}{fmt_et(p['et']):>5}{RST}{extra}"
     else:
         who = f"{GRY}(process hidden){RST}"
-    return f" {LIME}U-{g['idx']}{RST} {util}  {vram}  {temp_s(g['temp'])}  {who}"
+    return f" {T.key}U-{g['idx']}{RST} {util}  {vram}  {temp_s(g['temp'])}  {who}"
 
 
 GPU_HEAD = f"{DGRY}{'':5}{'SYNC':<15}  {'LCL · VRAM':<19}  {'TEMP':>6}  {'PILOT':<9} {'PROCESS':<12} {'UP':>5}{RST}"
 
 
 def lcl_row(tag, pct, text):
-    return f" {AMB}{tag}{RST} {bar(pct, 10)} {heat(pct)}{pct:>3.0f}%{RST}  {text}"
+    return f" {T.side}{tag}{RST} {bar(pct, 10)} {heat(pct)}{pct:>3.0f}%{RST}  {text}"
 
 
 def magi_verdict(gpus):
@@ -443,9 +544,9 @@ def banner_lines(interval=None, cols=None):
 
     right = header()
     right.append(section("CENTRAL DOGMA", "HOST"))
-    right.append(f" {LIME}OS{RST}      {WHT}{os_name()} · {os.uname().release}{RST}")
-    drv = f"{LIME}DRIVER{RST}  {WHT}{gpus[0]['drv']} · CUDA {cuda_version()}{RST}" if gpus else ""
-    right.append(f" {LIME}UPTIME{RST}  {WHT}{uptime():<20}{RST}{drv}")
+    right.append(f" {T.key}OS{RST}      {WHT}{os_name()} · {os.uname().release}{RST}")
+    drv = f"{T.key}DRIVER{RST}  {WHT}{gpus[0]['drv']} · CUDA {cuda_version()}{RST}" if gpus else ""
+    right.append(f" {T.key}UPTIME{RST}  {WHT}{uptime():<20}{RST}{drv}")
 
     if gpus:
         names = "/".join(sorted({g["name"] for g in gpus}))
@@ -459,7 +560,7 @@ def banner_lines(interval=None, cols=None):
     else:
         right.append(section("EVA UNITS", "GPU") + f"  {RED}nvidia-smi unavailable{RST}")
 
-    right.append(section("WARNING", "LCL", ORG))
+    right.append(section("WARNING", "LCL", T.alt))
     cm = core_map(cores)
     right.append(lcl_row("CPU", cpu, cm[0]))
     right.append(f"{'':5}{GRY}{f'{ncpu}T · load {load1:.0f}':<15}{RST}  {cm[1]}")
@@ -474,29 +575,16 @@ def banner_lines(interval=None, cols=None):
     votes, msg = magi_verdict(gpus)
     right.append(f" {votes}   {msg}")
     ts = tmux_sessions()
-    tmux = f" {GRY}tmux{RST} {AMB}{ts} session{'s' if ts != 1 else ''}{RST}"
+    tmux = f" {GRY}tmux{RST} {T.side}{ts} session{'s' if ts != 1 else ''}{RST}"
     if interval is None:
-        right.append(tmux + f"   {GRY}live{RST} {CYAN}eva{RST} {GRY}/{RST} {CYAN}asuka{RST}"
-                     f"   {ORG}惣流・アスカ {GRY}— {AMB}Anta baka?{RST}")
+        right.append(tmux + f"   {GRY}live{RST} {T.data}eva{RST}"
+                     f"   {T.alt}{T.jp} {GRY}— {T.side}{T.quote}{RST}")
     else:
         right.append(tmux + f"   {LIME}●{RST} {WHT}{time.strftime('%H:%M:%S')}{RST}"
                      f" {GRY}every {interval:g}s · +/- interval · d detail · q quit{RST}")
-    # largest Asuka that fits beside the info column; none if the terminal is too narrow
+    # largest avatar that fits beside the info column; none if the terminal is too narrow
     cols = cols or shutil.get_terminal_size((160, 40)).columns
-    room = cols - 2 - max(W, max(vlen(r) for r in right))
-    logo = []
-    for w in (50, 44, 40, 32, 26):
-        lp = os.path.join(SHARE, f"avatar-{w}.ans")
-        if w <= room and os.path.exists(lp):
-            logo = open(lp).read().rstrip("\n").split("\n")
-            break
-    lw = max((vlen(l) for l in logo), default=0)
-    out = []
-    for i in range(max(len(logo), len(right))):
-        left = logo[i] if i < len(logo) else " " * lw
-        r = right[i] if i < len(right) else ""
-        out.append((pad(left, lw) + RST + "  " if logo else "") + r)
-    return out
+    return beside(avatar_lines(cols - 2 - max(W, max(vlen(r) for r in right))), right)
 
 
 # ── live monitor ─────────────────────────────────────────────────
@@ -575,24 +663,24 @@ def watch_frame(gpus, hist, interval, cols):
     free = sum(idle(g) for g in gpus)
     host = cage_name()
     sw = max(10, min(40, cols - 96))
-    L = [f"{bg(200, 20, 30)}{WHT}{BOLD} EVA-02 {RST}{bg(60, 10, 15)}{AMB} MAGI LIVE MONITOR {RST}"
+    L = [f"{T.bg_main}{WHT}{BOLD} {T.unit} {RST}{T.bg_dark}{T.side} MAGI LIVE MONITOR {RST}"
          f"  {WHT}{host}{RST}  {GRY}{time.strftime('%Y-%m-%d %H:%M:%S')}{RST}"
          f"  {LIME if free else ORG}{free}/{len(gpus)} STANDBY{RST}"
          f"  {GRY}every {interval:g}s · +/- interval · h home · q quit{RST}", ""]
     cpu_prime()
     for g in gpus:
         memp = g["mem"] / g["memt"] * 100 if g["memt"] else 0
-        L.append(f" {LIME}{BOLD}UNIT-{g['idx']}{RST}"
+        L.append(f" {T.key}{BOLD}UNIT-{g['idx']}{RST}"
                  f"  {GRY}SYNC{RST} {bar(g['util'], 16)} {heat(g['util'])}{g['util']:>3.0f}%{RST}"
-                 f"  {GRY}LCL{RST} {bar(memp, 12, CYAN)} {WHT}{g['mem'] / 1024:>4.1f}{GRY}/{g['memt'] / 1024:.0f}G{RST}"
+                 f"  {GRY}LCL{RST} {bar(memp, 12, T.data)} {WHT}{g['mem'] / 1024:>4.1f}{GRY}/{g['memt'] / 1024:.0f}G{RST}"
                  f" {temp_s(g['temp'])} {GRY}{g['pw']:>4.0f}/{g['pwl']:.0f}W{RST}"
                  f"  {spark(hist.get(g['idx'], []), sw)}")
         if idle(g):
             L.append(f"   {DGRY}└{RST} {LIME}STANDBY{RST}")
         else:
             procs = sorted(g["procs"], key=lambda p: -p["mem"])
-            items = [f"{CYAN}{p['user'][:12]}{RST} {GRY}{p['name'][:22]}{RST} {DGRY}pid{RST} {GRY}{p['pid']}{RST}"
-                     f" {WHT}{p['mem'] / 1024:.1f}G{RST} {AMB}{fmt_et(p['et'])}{RST}" for p in procs[:2]]
+            items = [f"{T.data}{p['user'][:12]}{RST} {GRY}{p['name'][:22]}{RST} {DGRY}pid{RST} {GRY}{p['pid']}{RST}"
+                     f" {WHT}{p['mem'] / 1024:.1f}G{RST} {T.side}{fmt_et(p['et'])}{RST}" for p in procs[:2]]
             more = f" {GRY}+{len(procs) - 2} more{RST}" if len(procs) > 2 else ""
             L.append(f"   {DGRY}└{RST} " + f"  {DGRY}│{RST} ".join(items or [f"{GRY}(process hidden){RST}"]) + more)
     m = meminfo()
@@ -601,8 +689,8 @@ def watch_frame(gpus, hist, interval, cols):
     ncpu = os.cpu_count() or 1
     cm = core_map(cores)
     L.append("")
-    L.append(f" {AMB}CPU{RST}  {bar(cpu, 16)} {heat(cpu)}{cpu:>3.0f}%{RST}  {cm[0]}"
-             f"  {AMB}MEM{RST} {bar(m['used'] / m['total'] * 100, 16)} {WHT}{m['used']:.0f}/{m['total']:.0f}G{RST}")
+    L.append(f" {T.side}CPU{RST}  {bar(cpu, 16)} {heat(cpu)}{cpu:>3.0f}%{RST}  {cm[0]}"
+             f"  {T.side}MEM{RST} {bar(m['used'] / m['total'] * 100, 16)} {WHT}{m['used']:.0f}/{m['total']:.0f}G{RST}")
     L.append(f"      {GRY}{f'{ncpu}T · load {load1:.0f}/{load5:.0f}':<21}{RST}  {cm[1]}")
     votes, msg = magi_verdict(gpus)
     L.append(f" {votes}   {msg}")
@@ -611,6 +699,8 @@ def watch_frame(gpus, hist, interval, cols):
 
 # ── prompt / tmux segment ────────────────────────────────────────
 def seg(mode):
+    if DEMO:
+        return seg_print(mode, [[g["util"], g["mem"], g["temp"]] for g in demo_gpus()])
     os.makedirs(CACHE, exist_ok=True)
     path = os.path.join(CACHE, "seg.csv")
     try:
@@ -629,13 +719,17 @@ def seg(mode):
         rows = [[num(x) for x in l.split(",")] for l in open(path).read().strip().splitlines()]
     except OSError:
         return
+    seg_print(mode, rows)
+
+
+def seg_print(mode, rows):
     if not rows:
         return
     free = sum(1 for u, m, _ in rows if u < IDLE_UTIL and m < IDLE_MEM_MIB)
     avg = sum(r[0] for r in rows) / len(rows)
     hot = [str(i) for i, r in enumerate(rows) if r[2] >= HOT_C]
     if mode == "tmux":
-        s = f"#[fg=#e62028,bold]{cage_name()} #[default]"
+        s = f"#[fg={T.hex('frame')},bold]{cage_name()} #[default]"
         s += (f"#[fg=#96ff3c]" if free else "#[fg=#ff8000]") + f"▣ {free}/{len(rows)} free "
         s += f"#[fg=#827d87]· util #[fg=#f0ece8]{avg:.0f}% "
         if hot:
@@ -643,6 +737,18 @@ def seg(mode):
         print(s)
     else:
         print(f"▣ {free}/{len(rows)}" + (f" ⚠{','.join(hot)}" if hot else ""))
+
+
+def units():
+    current = T.code
+    for code, u in UNITS.items():
+        use_unit(code)
+        mark = f"{LIME}●{RST}" if code == current else " "
+        swatch = "".join(bg(*u[r]) + "  " for r in ("frame", "alt", "side", "data")) + RST
+        print(f" {mark} {T.main}{BOLD}{code}{RST}  {swatch}  {T.main}{u['unit']:<8}{RST} {WHT}{u['pilot']:<20}{RST}"
+              f" {pad(T.alt + u['jp'] + RST, 14)} {GRY}{u['quote']}{RST}")
+    use_unit(current)
+    print(f"\n   {GRY}pick one with{RST} EVA_UNIT=01 {GRY}(or set it in your shell rc / re-run install with it){RST}")
 
 
 def main():
@@ -653,6 +759,11 @@ def main():
         live(float(a[1]) if len(a) > 1 else 1.0, home_frame if a[0] == "home" else detail_frame)
     elif a[0] == "seg":
         seg(a[1] if len(a) > 1 else "prompt")
+    elif a[0] == "units":
+        units()
+    elif a[0] == "template":  # stdin → stdout, @@role@@ → hex colour, @@unit@@ → unit name (install scripts)
+        text = sys.stdin.read().replace("@@unit@@", T.unit)
+        sys.stdout.write(re.sub(r"@@(\w+)@@", lambda m: T.hex(m.group(1)), text))
     else:
         print(__doc__)
 

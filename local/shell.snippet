@@ -1,7 +1,8 @@
 # >>> eva00 >>>
-# EVA-00 banner on shell start (falls back to fastfetch); `eva` / `rei` = live-refreshing view
+# NERV banner on shell start (falls back to fastfetch); `eva` / `rei` = live-refreshing view
 if [[ $- == *i* ]]; then
   case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+  export EVA_UNIT="${EVA_UNIT:-__EVA_UNIT__}"   # theme: 00 01 02 06 08 (eva02 units)
   alias eva='eva00 home' rei='eva00 home'
   if command -v eva00 >/dev/null; then eva00; elif command -v fastfetch >/dev/null; then fastfetch; fi
 fi

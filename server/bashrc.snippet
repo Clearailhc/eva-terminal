@@ -2,16 +2,17 @@
 if [[ $- == *i* ]]; then
   export PATH="$HOME/.local/bin:$PATH"
   export EVA02_NAME="${EVA02_NAME:-__EVA02_NAME__}"   # display name in banner / prompt / tmux
+  export EVA_UNIT="${EVA_UNIT:-__EVA_UNIT__}"         # theme: 00 01 02 06 08 (eva02 units)
   # local terminals like kitty/ghostty send a TERM this server may not know
   infocmp "$TERM" >/dev/null 2>&1 || export TERM=xterm-256color
-  alias eva='eva02 home' asuka='eva02 watch'
+  alias eva='eva02 home' magi='eva02 watch' asuka='eva02 watch'
   # banner once per login: not inside tmux panes or nested shells
   if [[ -z $TMUX && -z $EVA02_SHOWN && -t 1 ]] && command -v eva02 >/dev/null; then
     export EVA02_SHOWN=1
     eva02 banner
   fi
-  # tab title: "EVA-02 · <name> · ~/path" instead of a long cloud instance id
-  eva02_title() { printf '\e]0;EVA-02 · %s · %s\a' "${EVA02_NAME:-$HOSTNAME}" "${PWD/#$HOME/\~}"; }
+  # tab title: "MAGI · <name> · ~/path" instead of a long cloud instance id
+  eva02_title() { printf '\e]0;MAGI · %s · %s\a' "${EVA02_NAME:-$HOSTNAME}" "${PWD/#$HOME/\~}"; }
   starship_precmd_user_func=eva02_title
   command -v starship >/dev/null && eval "$(starship init bash)"
 fi

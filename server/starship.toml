@@ -1,6 +1,7 @@
 "$schema" = 'https://starship.rs/config-schema.json'
-# EVA-02 remote prompt — same catppuccin powerline as local, but the leading
-# segment is plugsuit red with the host name so you always know you're remote.
+# @@unit@@ remote prompt — catppuccin powerline whose leading segment is the unit's
+# colour with the host name, so you always know you're remote.
+# template: install.sh fills @@…@@ with the chosen unit's colours (eva02 template)
 
 format = """
 [](fg:eva)\
@@ -81,7 +82,7 @@ show_milliseconds = true
 format = " in $duration "
 
 [palettes.eva02]
-eva = "#e62028"
+eva = "@@frame@@"
 plug = "#f0ece8"
 peach = "#fab387"
 yellow = "#f9e2af"

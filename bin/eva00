@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""EVA-00 // NERV HQ — local terminal banner (Rei edition), built on the eva02 engine.
+"""NERV HQ — local terminal banner (default unit: EVA-00), built on the eva02 engine.
 
   eva00            banner (replaces fastfetch on shell start)
   eva00 home [s]   the same page, live-refreshing in place (q quit, +/- interval)
+
+EVA_UNIT=01|02|00|06|08 picks the unit (see `eva02 units`).
 """
 import glob
 import os
@@ -16,15 +18,14 @@ _engine = os.path.join(os.path.dirname(os.path.realpath(__file__)), "eva02")
 _spec = importlib.util.spec_from_loader("evacore", SourceFileLoader("evacore", _engine))
 core = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(core)
-RST, BOLD, bar, heat, heat_rgb, fg, vlen, pad, run = (
-    core.RST, core.BOLD, core.bar, core.heat, core.heat_rgb, core.fg, core.vlen, core.pad, core.run)
+RST, BOLD, bar, heat, heat_rgb, fg, vlen, pad, run, T = (
+    core.RST, core.BOLD, core.bar, core.heat, core.heat_rgb, core.fg, core.vlen, core.pad, core.run, core.T)
+core.use_unit(os.environ.get("EVA_UNIT"), default="00")
 
-SHARE = os.path.expanduser("~/.local/share/eva00")
-
-# NERV HQ palette: the 256-colour codes the original fastfetch theme used
+# semantic colours (state, not theme) — the 256-colour codes of the original fastfetch look
 def c256(n): return f"\x1b[38;5;{n}m"
-GRN, AMB, ORG, RED, DORG = c256(46), c256(220), c256(208), c256(196), c256(166)
-CYAN, WHT, GRY, DGRY = c256(51), c256(255), c256(245), c256(239)
+OK, AMB, ORG, RED = c256(46), c256(220), c256(208), c256(196)
+WHT, GRY, DGRY = c256(255), c256(245), c256(239)
 
 W = 70  # info column width: Rei (42) + 2 + 70 fits a 114-column terminal
 KEY = 12  # "│ " + 10-char key, matching the original "│ DESIGNATION" column
@@ -157,6 +158,10 @@ def net_rate():
     return (rx - prev[1]) / dt, (tx - prev[2]) / dt
 
 
+def uname():
+    return os.uname()
+
+
 def login_since():
     """Start of the user's graphical/tty session (who is empty under GNOME on Wayland)."""
     user = os.environ.get("USER", "")
@@ -186,15 +191,15 @@ def section(stripe_a, stripe_b, title, tag):
     return f"{s} {stripe_a}{title}{RST} {s}{RST} {tag}{RST}"
 
 
-def key(k, color=GRN):
-    return f"{color}│ {k:<{KEY - 2}}{RST}"
+def key(k, color=None):
+    return f"{color or T.key}│ {k:<{KEY - 2}}{RST}"
 
 
-def row(k, text, color=GRN):
+def row(k, text, color=None):
     return f"{key(k, color)} {text}"
 
 
-def bar_row(k, pct, text, color=GRN, bar_color=None):
+def bar_row(k, pct, text, color=None, bar_color=None):
     return f"{key(k, color)} {bar(pct, 10, bar_color)} {heat(pct)}{pct:>3.0f}%{RST}  {text}"
 
 
@@ -211,18 +216,8 @@ def core_bars(vals):
     return "".join(fg(*heat_rgb(v)) + ticks[min(7, int(v / 100 * 7.999))] + " " for v in vals) + RST
 
 
-NERV = [
-    "███╗   ██╗███████╗██████╗ ██╗   ██╗",
-    "████╗  ██║██╔════╝██╔══██╗██║   ██║",
-    "██╔██╗ ██║█████╗  ██████╔╝██║   ██║",
-    "██║╚██╗██║██╔══╝  ██╔══██╗╚██╗ ██╔╝",
-    "██║ ╚████║███████╗██║  ██║ ╚████╔╝ ",
-    "╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ",
-]
-SIDE = [f"{AMB}EVA-00 SYSTEM", f"{AMB}MAGI INTERFACE", "", f"{ORG}CLASSIFIED", f"{ORG}ACCESS ONLY", ""]
-
-
-def box(lines, color=RED, width=W):
+def box(lines, color=None, width=W):
+    color = color or T.frame
     inner = width - 2
     out = [f"{color}╔{'═' * inner}╗{RST}"]
     out += [f"{color}║{RST}{pad(' ' + l + RST, inner)}{color}║{RST}" for l in lines]
@@ -232,11 +227,12 @@ def box(lines, color=RED, width=W):
 
 def nerve_bar(width=W):
     inner = width - 2
-    title = f"{GRN}00101{ORG} ●{DORG}────{ORG}● NERVE CONNECTION INTERFACE ●{DORG}────{ORG}● {GRN}00102"
+    a, a2 = T.alt, T.alt2
+    title = f"{T.main}00101{a} ●{a2}────{a}● NERVE CONNECTION INTERFACE ●{a2}────{a}● {T.main}00102"
     mid = pad(" " + title, inner)
-    return [f"{ORG}╔══●{DORG}{'━' * (inner - 6)}{ORG}●══╗{RST}",
-            f"{ORG}║{RST}{mid}{RST}{ORG}║{RST}",
-            f"{ORG}╚══●{DORG}{'━' * (inner - 6)}{ORG}●══╝{RST}"]
+    return [f"{a}╔══●{a2}{'━' * (inner - 6)}{a}●══╗{RST}",
+            f"{a}║{RST}{mid}{RST}{a}║{RST}",
+            f"{a}╚══●{a2}{'━' * (inner - 6)}{a}●══╝{RST}"]
 
 
 def settled_cols():
@@ -249,20 +245,12 @@ def settled_cols():
             return os.get_terminal_size(sys.stdout.fileno())
         except OSError:
             return os.terminal_size((160, 40))
-    first = sz = size()
+    sz = size()
     if tuple(sz) == (80, 24):
         end = time.time() + 0.5
         while time.time() < end and tuple(sz) == (80, 24):
             time.sleep(0.03)
             sz = size()
-    try:  # startup size log (to verify the resize race); keeps the last 20 lines
-        log = os.path.expanduser("~/.cache/eva00/size.log")
-        os.makedirs(os.path.dirname(log), exist_ok=True)
-        lines = open(log).read().splitlines()[-19:] if os.path.exists(log) else []
-        lines.append(f"{time.strftime('%H:%M:%S')} first={tuple(first)} used={tuple(sz)}")
-        open(log, "w").write("\n".join(lines) + "\n")
-    except OSError:
-        pass
     return sz.columns
 
 
@@ -282,14 +270,15 @@ def page(interval=None, cols=None):
     ncpu = os.cpu_count() or 1
     warn = []
 
-    R = box([f"{GRN}{n}  {s}" for n, s in zip(NERV, SIDE)])
+    side = [f"{T.side}{T.unit} SYSTEM", f"{T.side}MAGI INTERFACE", "", f"{T.alt}CLASSIFIED", f"{T.alt}ACCESS ONLY", ""]
+    R = box([f"{T.main}{n}  {s}" for n, s in zip(core.big(T.org), side)])
     R += nerve_bar()
 
-    R.append(section(ORG, DORG, "BORDER LINE", f"{GRN}[{AMB}SYSTEM CONFIG{GRN}]"))
-    R.append(row("OS", f"{WHT}{core.os_name()} · {os.uname().machine}{RST}"))
-    R.append(row("KERNEL", f"{WHT}{os.uname().release:<24}{RST}{GRN}UPTIME{RST} {WHT}{core.uptime()}{RST}"))
+    R.append(section(T.alt, T.alt2, "BORDER LINE", f"{T.main}[{T.side}SYSTEM CONFIG{T.main}]"))
+    R.append(row("OS", f"{WHT}{core.os_name()} · {uname().machine}{RST}"))
+    R.append(row("KERNEL", f"{WHT}{uname().release:<24}{RST}{T.key}UPTIME{RST} {WHT}{core.uptime()}{RST}"))
 
-    R.append(section(ORG, DORG, "ABSOLUTE", f"{RED}[{AMB}FIRST CHILD{RED}]{RST} {CYAN}REI AYANAMI"))
+    R.append(section(T.alt, T.alt2, "ABSOLUTE", f"{T.frame}[{T.side}{T.child}{T.frame}]{RST} {T.data}{T.pilot}"))
     since = login_since()
     R.append(row("DESIGNATION", f"{WHT}{os.environ.get('USER', '')}{RST}" + (f"{GRY}, since {since}{RST}" if since else "")))
     lk = links()
@@ -297,36 +286,36 @@ def page(interval=None, cols=None):
     shown = lk[:1] if net else lk[:2]
     lk_s = f"{GRY} · {RST}".join(f"{WHT}{ip}{RST} {GRY}{i}{RST}" for i, ip in shown) or f"{RED}OFFLINE{RST}"
     if net:
-        lk_s += f"  {GRN}↓{WHT}{human(net[0])}/s {ORG}↑{WHT}{human(net[1])}/s{RST}"
+        lk_s += f"  {T.key}↓{WHT}{human(net[0])}/s {T.alt}↑{WHT}{human(net[1])}/s{RST}"
     R.append(row("NEURAL-LINK", lk_s))
 
-    R.append(section(RED, ORG, "DANGER", f"{RED}[{AMB}UNIT-00{RED}]{RST} {CYAN}CORE STATUS"))
-    R.append(bar_row("CPU-CORE", cpu, f"{WHT}{cpu_model()}{RST} {GRY}· {favg:.1f}/{fcap:.1f}GHz{RST}", AMB))
+    R.append(section(T.frame, T.alt, "DANGER", f"{T.frame}[{T.side}{T.tag}{T.frame}]{RST} {T.data}CORE STATUS"))
+    R.append(bar_row("CPU-CORE", cpu, f"{WHT}{cpu_model()}{RST} {GRY}· {favg:.1f}/{fcap:.1f}GHz{RST}", T.side))
     therm = "  ".join(x for x in (f"{GRY}PKG{RST} {temp_c(pkg)}" if pkg is not None else "",
                                   f"{GRY}FAN{RST} {WHT}{fan}rpm{RST}" if fan is not None else "") if x)
-    R.append(row("SYNC-RATE", f"{core_bars(cores)} {therm}", AMB))
+    R.append(row("SYNC-RATE", f"{core_bars(cores)} {therm}", T.side))
     if g:
         drv, act, mx = g
         R.append(bar_row("GPU-CORE", act / mx * 100 if mx else 0,
-                         f"{WHT}{gpu_name()}{RST} {GRY}· {act / 1000:.2f}/{mx / 1000:.2f}GHz · {drv}{RST}", AMB, CYAN))
+                         f"{WHT}{gpu_name()}{RST} {GRY}· {act / 1000:.2f}/{mx / 1000:.2f}GHz · {drv}{RST}", T.side, T.data))
     if pkg is not None and pkg >= 95:
         warn.append("CORE TEMPERATURE CRITICAL")
 
-    R.append(section(RED, ORG, "WARNING", f"{AMB}[{CYAN}LCL{AMB}] [{CYAN}A.T. FIELD{AMB}]"))
+    R.append(section(T.frame, T.alt, "WARNING", f"{T.side}[{T.data}LCL{T.side}] [{T.data}A.T. FIELD{T.side}]"))
     memp = m["used"] / m["total"] * 100
     swap = f" · swap {m['swapu']:.1f}/{m['swapt']:.0f}G" if m["swapt"] else ""
-    R.append(bar_row("LCL-LEVEL", memp, f"{WHT}{m['used']:.1f}{GRY}/{m['total']:.1f}G{RST}  {GRY}cache {m['cache']:.1f}G{swap}{RST}", ORG))
+    R.append(bar_row("LCL-LEVEL", memp, f"{WHT}{m['used']:.1f}{GRY}/{m['total']:.1f}G{RST}  {GRY}cache {m['cache']:.1f}G{swap}{RST}", T.alt))
     dp = du / dt * 100 if dt else 0
-    R.append(bar_row("ENTRY-PLUG", dp, f"{WHT}{du:.0f}{GRY}/{dt / 1024:.2f}T{RST}  {GRY}/ · nvme{RST} {temp_c(nvme, 60, 70)}", ORG))
+    R.append(bar_row("ENTRY-PLUG", dp, f"{WHT}{du:.0f}{GRY}/{dt / 1024:.2f}T{RST}  {GRY}/ · nvme{RST} {temp_c(nvme, 60, 70)}", T.alt))
     if bat:
-        st = {"Charging": f"{GRN}⚡ charging", "Discharging": f"{AMB}on battery", "Full": f"{GRN}full",
+        st = {"Charging": f"{OK}⚡ charging", "Discharging": f"{AMB}on battery", "Full": f"{OK}full",
               "Not charging": f"{GRY}plugged"}.get(bat["st"], f"{GRY}{bat['st']}")
         extra = f" {GRY}· {WHT}{bat['pw']:.1f}W{RST}" if bat["pw"] > 0.5 else ""
         if bat["left"]:
             extra += f" {GRY}· {WHT}{fmt_h(bat['left'])}{RST}"
         prof = power_profile()
         extra += f" {GRY}· {prof}{RST}" if prof else ""
-        R.append(bar_row("A.T.FIELD", bat["cap"], f"{st}{RST}{extra}", ORG, heat(100 - bat["cap"])))
+        R.append(bar_row("A.T.FIELD", bat["cap"], f"{st}{RST}{extra}", T.alt, heat(100 - bat["cap"])))
         if bat["cap"] <= 15 and bat["st"] == "Discharging":
             warn.append("A.T. FIELD COLLAPSING")
     if memp >= 90:
@@ -337,31 +326,41 @@ def page(interval=None, cols=None):
     if warn:
         status = f"{RED}{BOLD}[PATTERN BLUE] {ORG}MAGI: {RED}ALERT {ORG}· {RED}{' · '.join(warn)}"
     else:
-        status = f"{GRN}[SYSTEMS NOMINAL] {ORG}MAGI: {GRN}ONLINE  {ORG}STATUS: {GRN}OK"
+        status = f"{T.key}[SYSTEMS NOMINAL] {T.alt}MAGI: {T.key}ONLINE  {T.alt}STATUS: {T.key}OK"
     R += box([status])
     if interval is None:
-        R.append(f"{'':6}{GRN}PILOT REI AYANAMI - READY FOR DEPLOYMENT{RST}   {GRY}live:{RST} {CYAN}eva{RST}")
-        R.append(f"{'':8}{ORG}綾波レイ  (I am not a doll. I am me.){RST}")
+        R.append(f"{'':6}{T.key}PILOT {T.pilot} - READY FOR DEPLOYMENT{RST}   {GRY}live:{RST} {T.data}eva{RST}")
+        R.append(f"{'':8}{T.alt}{T.jp}  ({T.quote}){RST}")
     else:
-        R.append(f"{'':6}{GRN}●{RST} {WHT}{time.strftime('%H:%M:%S')}{RST}"
+        R.append(f"{'':6}{OK}●{RST} {WHT}{time.strftime('%H:%M:%S')}{RST}"
                  f" {GRY}every {interval:g}s · +/- interval · q quit{RST}")
 
-    # largest Rei that fits beside the info column; none if the terminal is too narrow
+    # largest avatar that fits beside the info column; none if the terminal is too narrow
     cols = cols or settled_cols()
-    room = cols - 2 - max(W, max(vlen(r) for r in R))
-    logo = []
-    for w in (50, 44, 40, 32, 26):
-        lp = os.path.join(SHARE, f"avatar-{w}.ans")
-        if w <= room and os.path.exists(lp):
-            logo = open(lp).read().rstrip("\n").split("\n")
-            break
-    lw = max((vlen(l) for l in logo), default=0)
-    out = []
-    for i in range(max(len(logo), len(R))):
-        left = logo[i] if i < len(logo) else " " * lw
-        r = R[i] if i < len(R) else ""
-        out.append((pad(left, lw) + RST + "  " if logo else "") + r)
-    return out
+    return core.beside(core.avatar_lines(cols - 2 - max(W, max(vlen(r) for r in R))), R)
+
+
+# ── demo data (EVA00_DEMO=1): fixed fake sensors, for screenshots ─
+if os.environ.get("EVA00_DEMO") == "1":
+    import math
+    _cores = [62, 18, 9, 71, 12, 4, 33, 88, 7, 15, 3, 21, 46, 9, 2, 11]
+    core.cpu_usage = lambda: (sum(_cores) / len(_cores), [c + 4 * math.sin(time.time() + i) % 5 for i, c in enumerate(_cores)])
+    core.meminfo = lambda: dict(used=11.8, total=31.2, cache=9.6, swapu=0.0, swapt=8.0)
+    core.disk = lambda path: (412.0, 1907.0)
+    core.uptime = lambda: "3 hours, 7 mins"
+    core.os_name = lambda: "Ubuntu 26.04 LTS"
+    uname = lambda: os.uname_result(("Linux", "magi", "7.0.0-generic", "#1", "x86_64"))
+    cpu_model = lambda: "Core Ultra 7 155H"
+    cpu_freqs = lambda: (2.4, 4.6, 4.8)
+    temps = lambda: (63.0, 38.0, 2600)
+    gpu = lambda: ("xe", 1350, 2250)
+    gpu_name = lambda: "Arc Graphics"
+    battery = lambda: dict(cap=76, st="Discharging", pw=9.4, left=5.3, health=97.0)
+    power_profile = lambda: "balanced"
+    links = lambda: [("wlan0", "192.168.1.20"), ("wg0", "10.8.0.2")]
+    login_since = lambda: "2026-10-20 08:30:00"
+    _net = net_rate
+    net_rate = lambda: (1.8e6, 2.4e5) if _net() is not None else None
 
 
 def main():
