@@ -4,7 +4,7 @@
   eva00            banner (replaces fastfetch on shell start)
   eva00 home [s]   the same page, live-refreshing in place (q quit, +/- interval)
 
-EVA_UNIT=01|02|00|06|08 picks the unit (see `eva02 units`).
+Switch unit with `eva-unit 01` (saved), or `EVA_UNIT=01 eva00` for a one-off.
 """
 import glob
 import os
@@ -20,7 +20,7 @@ core = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(core)
 RST, BOLD, bar, heat, heat_rgb, fg, vlen, pad, run, T = (
     core.RST, core.BOLD, core.bar, core.heat, core.heat_rgb, core.fg, core.vlen, core.pad, core.run, core.T)
-core.use_unit(os.environ.get("EVA_UNIT"), default="00")
+core.use_unit(core.chosen_unit(), default="00")
 
 # semantic colours (state, not theme) — the 256-colour codes of the original fastfetch look
 def c256(n): return f"\x1b[38;5;{n}m"

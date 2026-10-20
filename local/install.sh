@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Install the local (NERV) theme for the current user (zsh or bash). Idempotent; no root needed.
-#   local/install.sh                 # unit EVA-00, into the rc file of your login shell
-#   EVA_UNIT=01 local/install.sh     # pick a unit (see: bin/eva02 units)
+#   local/install.sh                 # into the rc file of your login shell (unit: EVA-00, or your saved choice)
+#   EVA_UNIT=01 local/install.sh     # also switch unit (same as running `eva-unit 01` afterwards)
 #   local/install.sh ~/.bashrc       # or name the rc file explicitly
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-UNIT=${EVA_UNIT:-00}
 case "${1:-$(basename "${SHELL:-bash}")}" in
   zsh) RC=~/.zshrc ;; bash) RC=~/.bashrc ;; *) RC=$1 ;;
 esac
@@ -18,5 +17,6 @@ rm -rf ~/.local/share/eva00   # avatars used to live here
 touch "$RC"
 cp "$RC" "$RC.bak.$(date +%Y%m%d-%H%M%S)"
 sed -i '/^# >>> eva00 >>>$/,/^# <<< eva00 <<<$/d' "$RC"
-sed "s/__EVA_UNIT__/$UNIT/" "$ROOT/local/shell.snippet" >> "$RC"
-echo "· installed unit $UNIT into $RC — open a new terminal, or run: eva"
+cat "$ROOT/local/shell.snippet" >> "$RC"
+if [[ -n ${EVA_UNIT:-} ]]; then EVA_UNIT= ~/.local/bin/eva02 use "$EVA_UNIT" >/dev/null; fi
+echo "· installed into $RC — open a new terminal, or run: eva  (switch units: eva-unit)"

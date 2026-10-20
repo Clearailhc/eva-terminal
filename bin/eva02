@@ -5,10 +5,12 @@
   eva02 home [s]   the banner page, live-refreshing in place (q quit, +/- interval)
   eva02 watch [s]  detailed live monitor: per-process rows, power, util history
   eva02 seg MODE   one-line summary for prompt / tmux (MODE = prompt | tmux), cached
-  eva02 units      list the available units (themes)
+  eva02 units [D]  list the available units (themes); D = default unit to mark when none is saved
+  eva02 use UNIT   switch unit for good (saved in ~/.config/eva-terminal/unit)
   eva02 template   fill @@role@@ / @@unit@@ placeholders in a config read from stdin
 
-EVA_UNIT=01|02|00|06|08 picks the unit; it only changes looks, never the data shown.
+Unit = $EVA_UNIT if set (one-off), else the one saved by `use`, else EVA-02.
+It only changes looks, never the data shown.
 """
 import os
 import re
@@ -91,7 +93,20 @@ def use_unit(code, default="02"):
     T.hex = lambda role: "#%02x%02x%02x" % T.rgb[role]
 
 
-use_unit(os.environ.get("EVA_UNIT"))
+UNIT_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), "eva-terminal", "unit")
+
+
+def chosen_unit():
+    """$EVA_UNIT for a one-off, else the unit saved by `eva02 use`."""
+    if os.environ.get("EVA_UNIT"):
+        return os.environ["EVA_UNIT"]
+    try:
+        return open(UNIT_FILE).read().strip()
+    except OSError:
+        return None
+
+
+use_unit(chosen_unit())
 
 # ANSI Shadow lettering for the unit / organisation names
 FONT = {
@@ -739,6 +754,36 @@ def seg_print(mode, rows):
         print(f"▣ {free}/{len(rows)}" + (f" ⚠{','.join(hot)}" if hot else ""))
 
 
+TEMPLATED = [  # (template installed by server/install.sh, live config) — re-coloured on `use`
+    (os.path.join(HOME, ".local/share/eva02/starship.toml"), os.path.join(HOME, ".config/starship.toml")),
+    (os.path.join(HOME, ".local/share/eva02/tmux.conf"), os.path.join(HOME, ".tmux.conf")),
+]
+
+
+def use(code):
+    c = unit_code(code)
+    if not c:
+        print(f"{RED}unknown unit {code!r}{RST} — pick one of: {' '.join(UNITS)}")
+        return 1
+    os.makedirs(os.path.dirname(UNIT_FILE), exist_ok=True)
+    with open(UNIT_FILE, "w") as f:
+        f.write(c + "\n")
+    use_unit(c)
+    # on a server, re-colour the prompt and tmux — only configs this project generated
+    for tpl, dst in TEMPLATED:
+        try:
+            if os.path.exists(tpl) and "eva02 template" in open(dst).read():
+                text = open(tpl).read().replace("@@unit@@", T.unit)
+                with open(dst, "w") as f:
+                    f.write(re.sub(r"@@(\w+)@@", lambda m: T.hex(m.group(1)), text))
+                if dst.endswith(".tmux.conf"):
+                    run(["tmux", "source-file", dst], timeout=2)
+        except OSError:
+            pass
+    print(f"{T.main}{BOLD}● {T.unit}{RST}  {WHT}{T.pilot}{RST}  {GRY}— saved; new terminals and `eva` use it{RST}")
+    return 0
+
+
 def units():
     current = T.code
     for code, u in UNITS.items():
@@ -748,7 +793,7 @@ def units():
         print(f" {mark} {T.main}{BOLD}{code}{RST}  {swatch}  {T.main}{u['unit']:<8}{RST} {WHT}{u['pilot']:<20}{RST}"
               f" {pad(T.alt + u['jp'] + RST, 14)} {GRY}{u['quote']}{RST}")
     use_unit(current)
-    print(f"\n   {GRY}pick one with{RST} EVA_UNIT=01 {GRY}(or set it in your shell rc / re-run install with it){RST}")
+    print(f"\n   {GRY}switch with{RST} eva-unit 01 {GRY}· one-off:{RST} EVA_UNIT=01 eva")
 
 
 def main():
@@ -759,8 +804,11 @@ def main():
         live(float(a[1]) if len(a) > 1 else 1.0, home_frame if a[0] == "home" else detail_frame)
     elif a[0] == "seg":
         seg(a[1] if len(a) > 1 else "prompt")
-    elif a[0] == "units":
+    elif a[0] == "units":  # optional arg: the caller's default unit, to mark the right one when none is saved
+        use_unit(chosen_unit(), default=unit_code(a[1]) or "02") if len(a) > 1 else None
         units()
+    elif a[0] == "use":
+        sys.exit(use(a[1]) if len(a) > 1 else units())
     elif a[0] == "template":  # stdin → stdout, @@role@@ → hex colour, @@unit@@ → unit name (install scripts)
         text = sys.stdin.read().replace("@@unit@@", T.unit)
         sys.stdout.write(re.sub(r"@@(\w+)@@", lambda m: T.hex(m.group(1)), text))

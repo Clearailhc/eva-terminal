@@ -53,7 +53,15 @@ Every unit works with both layouts; it changes colours, lettering, pilot and quo
 
 </details>
 
-Switch any time with `EVA_UNIT=01 eva`, or install with a unit (below). Default: EVA-02 on servers, EVA-00 locally. Every unit ships with an avatar of its pilot; swap in your own any time ([own avatar](#use-your-own-avatar)).
+Switch units from the shell — the choice is saved in `~/.config/eva-terminal/unit`, so new terminals and `eva` keep it (on a server the prompt and tmux colours follow):
+
+```bash
+eva-unit        # list the units, current one marked
+eva-unit 06     # switch to Mark.06 for good and show it
+EVA_UNIT=01 eva # one-off look, nothing saved
+```
+
+Default: EVA-02 on servers, EVA-00 locally. Every unit ships with an avatar of its pilot; swap in your own any time ([own avatar](#use-your-own-avatar)).
 
 ## Features
 
@@ -103,7 +111,7 @@ Writes `avatar-{50,44,40,32,26}.ans` for that unit (crop a square around the fac
 
 | Variable | Default | |
 |---|---|---|
-| `EVA_UNIT` | `02` server · `00` local | theme: `00` `01` `02` `06` `08` |
+| `EVA_UNIT` | saved choice, else `02` server · `00` local | one-off unit override; `eva-unit` saves one |
 | `EVA02_NAME` | short hostname | name in banner, prompt, tmux, tab title |
 | `EVA02_HOT` | `80` | °C at which a GPU is flagged |
 | `EVA02_TTL` | `10` | seconds the prompt / tmux GPU summary is cached |
@@ -134,7 +142,7 @@ EVA 主题的 Linux 终端面板，两种布局，五台机体可选：零号机
 - **服务器布局**（默认二号机）：给共享 GPU 服务器用。登录横幅显示每张卡的算力和显存条、温度、谁在跑什么任务、跑了多久，加上 CPU 核心热力图、内存和磁盘。`eva` 打开实时刷新版，`magi` 打开详细面板。GPU 过热、没有空闲卡、磁盘快满时，MAGI 会给出告警。配套 starship prompt（机体颜色的主机徽标 + 空闲 GPU 数）和 tmux 状态栏。
 - **本机布局**（默认零号机）：给自己的电脑用。保留 NERV 风格，实时显示 CPU 占用、每个核的负载、温度、风扇、核显频率、内存、磁盘、电池功耗和剩余时间、网络。`eva` / `rei` 打开实时版。
 
-机体只改变配色、大标题、驾驶员和台词，不影响显示的数据；告警颜色在所有机体里都一样。`bin/eva02 units` 查看全部机体，`EVA_UNIT=01 eva` 临时切换。五台机体的效果见上方 [Units](#units)。
+机体只改变配色、大标题、驾驶员和台词，不影响显示的数据；告警颜色在所有机体里都一样。`eva-unit` 列出全部机体，`eva-unit 06` 永久切换（选择保存在 `~/.config/eva-terminal/unit`，服务器上 prompt 和 tmux 配色也会跟着变），`EVA_UNIT=01 eva` 只临时看一下。五台机体的效果见上方 [Units](#units)。
 
 纯 Python 标准库实现，不需要 root。
 
