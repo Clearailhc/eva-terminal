@@ -20,7 +20,7 @@ Every unit works with both layouts; it changes colours, lettering, pilot and quo
 
 ![EVA-01, Mark.06 and EVA-08 on the server layout](docs/units-server.png)
 
-Switch any time with `EVA_UNIT=01 eva`, or install with a unit (below). Default: EVA-02 on servers, EVA-00 locally. Avatars ship for EVA-00 and EVA-02; the others show the info column alone until you add one ([own avatar](#use-your-own-avatar)).
+Switch any time with `EVA_UNIT=01 eva`, or install with a unit (below). Default: EVA-02 on servers, EVA-00 locally. Every unit ships with an avatar of its pilot; swap in your own any time ([own avatar](#use-your-own-avatar)).
 
 ## Features
 
