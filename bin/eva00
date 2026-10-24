@@ -26,6 +26,8 @@ core.use_unit(core.chosen_unit(), default="00")
 def c256(n): return f"\x1b[38;5;{n}m"
 OK, AMB, ORG, RED = c256(46), c256(220), c256(208), c256(196)
 WHT, GRY, DGRY = c256(255), c256(245), c256(239)
+if core.LIGHT:  # the 256-colour set is for dark backgrounds; use the engine's contrast-checked ones
+    OK, AMB, ORG, RED, WHT, GRY, DGRY = core.LIME, core.AMB, core.ORG, core.RED, core.WHT, core.GRY, core.DGRY
 
 W = 70  # info column width: Rei (42) + 2 + 70 fits a 114-column terminal
 KEY = 12  # "│ " + 10-char key, matching the original "│ DESIGNATION" column

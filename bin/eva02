@@ -30,17 +30,88 @@ HOT_C = int(os.environ.get("EVA02_HOT", "80"))
 IDLE_UTIL, IDLE_MEM_MIB = 5, 1024
 DEMO = os.environ.get("EVA02_DEMO") == "1"  # fake 8-GPU data, for screenshots / trying it without a GPU
 
-# ── semantic colours: the same for every unit, so alerts always read the same ─
 def fg(r, g, b): return f"\x1b[38;2;{r};{g};{b}m"
 def bg(r, g, b): return f"\x1b[48;2;{r};{g};{b}m"
 RST, BOLD, DIM, REV = "\x1b[0m", "\x1b[1m", "\x1b[2m", "\x1b[7m"
-RED = fg(230, 32, 40)       # critical / overheat
-ORG = fg(255, 128, 0)       # high
-AMB = fg(255, 190, 40)      # medium
-LIME = fg(150, 255, 60)     # ok / standby
-WHT = fg(240, 236, 232)
-GRY = fg(130, 125, 135)
-DGRY = fg(70, 66, 76)
+
+
+# ── terminal background: light or dark ───────────────────────────
+def query_bg(timeout=0.25):
+    """Ask the terminal for its background colour (OSC 11). (r, g, b) or None if it doesn't answer."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    import termios
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+    except termios.error:
+        return None
+    new = termios.tcgetattr(fd)
+    new[3] &= ~(termios.ICANON | termios.ECHO)
+    reply = b""
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, new)
+        os.write(sys.stdout.fileno(), b"\x1b]11;?\x1b\\")
+        end = time.time() + timeout
+        while time.time() < end and not (reply.endswith(b"\x07") or reply.endswith(b"\x1b\\")):
+            r, _, _ = select.select([fd], [], [], max(0.0, end - time.time()))
+            if not r:
+                break
+            reply += os.read(fd, 64)
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, old)
+    m = re.search(rb"rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)", reply)
+    if not m:
+        return None
+    return tuple(int(int(h, 16) / (16 ** len(h) - 1) * 255) for h in m.groups())
+
+
+def _lum(c):
+    def ch(v):
+        v /= 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (ch(v) for v in c)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a, b):
+    hi, lo = sorted((_lum(a), _lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def detect_bg():
+    """EVA_BG=light|dark wins; then COLORFGBG; then ask the terminal; dark if nobody knows."""
+    want = os.environ.get("EVA_BG", "").lower()
+    if want in ("light", "dark"):
+        return (250, 250, 250) if want == "light" else (28, 27, 34)
+    fgbg = os.environ.get("COLORFGBG", "").split(";")
+    if fgbg[-1:] and fgbg[-1].isdigit():
+        return (250, 250, 250) if int(fgbg[-1]) in (7, 15) else (28, 27, 34)
+    return query_bg() or (28, 27, 34)
+
+
+BG = detect_bg()
+LIGHT = _lum(BG) > 0.4
+
+
+def ink(c):
+    """A foreground colour that stays readable on this background (darkened on light ones)."""
+    c = tuple(c)
+    while LIGHT and _contrast(c, BG) < 3.2 and max(c) > 8:
+        c = tuple(int(v * 0.88) for v in c)
+    return c
+
+
+# ── semantic colours: the same for every unit, so alerts always read the same ─
+RED = fg(*ink((230, 32, 40)))       # critical / overheat
+ORG = fg(*ink((255, 128, 0)))       # high
+AMB = fg(*ink((255, 190, 40)))      # medium
+LIME = fg(*ink((150, 255, 60)))     # ok / standby
+WHT = fg(*((34, 32, 40) if LIGHT else (240, 236, 232)))    # primary text
+GRY = fg(*((105, 100, 112) if LIGHT else (130, 125, 135)))
+DGRY = fg(*((175, 170, 182) if LIGHT else (70, 66, 76)))
+ON_COLOR = fg(255, 255, 255)        # text on a saturated badge, either background
+TRACK_RGB = (226, 223, 232) if LIGHT else (48, 45, 56)    # empty part of bars / idle cores
 
 # ── units (themes) ───────────────────────────────────────────────
 # Palette roles: main = big lettering, shadow = its box-drawing shadow, frame = borders,
@@ -85,11 +156,13 @@ def use_unit(code, default="02"):
     T.code = unit_code(code) or default
     u = UNITS[T.code]
     for k, v in u.items():
-        setattr(T, k, fg(*v) if k in ROLES else v)
+        setattr(T, k, fg(*ink(v)) if k in ROLES else v)
     T.rgb = {k: u[k] for k in ROLES}
     T.rgb["dark"] = tuple(c // 4 for c in u["frame"])   # badge / tmux session background
     T.rgb["deep"] = tuple(c // 9 for c in u["frame"])   # tmux status bar background
-    T.bg_main, T.bg_dark = bg(*u["frame"]), bg(*T.rgb["dark"])
+    # badges: saturated unit colour, then a muted strip (darkened on dark bg, washed out on light)
+    muted = tuple(int(c + (255 - c) * 0.8) for c in u["frame"]) if LIGHT else T.rgb["dark"]
+    T.bg_main, T.bg_dark = bg(*u["frame"]), bg(*muted)
     T.hex = lambda role: "#%02x%02x%02x" % T.rgb[role]
 
 
@@ -394,7 +467,7 @@ def heat(pct):
     return LIME
 
 
-TRACK = bg(48, 45, 56)
+TRACK = bg(*TRACK_RGB)
 
 
 def bar(pct, width, color=None):
@@ -406,7 +479,7 @@ def bar(pct, width, color=None):
     return TRACK + (color or heat(pct)) + "█" * n + part + " " * (width - n - len(part)) + RST
 
 
-HEAT_STOPS = [(0, (48, 45, 56)), (10, (40, 110, 40)), (35, (150, 255, 60)),
+HEAT_STOPS = [(0, TRACK_RGB), (10, (40, 110, 40)), (35, (150, 255, 60)),
               (65, (255, 190, 40)), (85, (255, 128, 0)), (100, (230, 32, 40))]
 
 
@@ -427,7 +500,7 @@ def core_map(vals, maxcells=45):
         n = len(vals)
         vals = [sum(vals[i * n // k:(i + 1) * n // k]) / max(1, (i + 1) * n // k - i * n // k) for i in range(k)]
     vals = list(vals) + [None] * (k - len(vals))
-    empty = (28, 27, 34)
+    empty = BG
     rows = []
     for r in range(2):
         cellstr = []
@@ -449,7 +522,7 @@ def spark(vals, width):
 
 def temp_s(t):
     if t >= HOT_C:
-        return f"{bg(200, 20, 30)}{WHT}{BOLD}⚠{t:>3.0f}°C{RST}"
+        return f"{bg(200, 20, 30)}{ON_COLOR}{BOLD}⚠{t:>3.0f}°C{RST}"
     return (ORG if t >= 70 else GRY) + f"{t:>4.0f}°C" + RST
 
 
@@ -678,7 +751,7 @@ def watch_frame(gpus, hist, interval, cols):
     free = sum(idle(g) for g in gpus)
     host = cage_name()
     sw = max(10, min(40, cols - 96))
-    L = [f"{T.bg_main}{WHT}{BOLD} {T.unit} {RST}{T.bg_dark}{T.side} MAGI LIVE MONITOR {RST}"
+    L = [f"{T.bg_main}{ON_COLOR}{BOLD} {T.unit} {RST}{T.bg_dark}{T.side} MAGI LIVE MONITOR {RST}"
          f"  {WHT}{host}{RST}  {GRY}{time.strftime('%Y-%m-%d %H:%M:%S')}{RST}"
          f"  {LIME if free else ORG}{free}/{len(gpus)} STANDBY{RST}"
          f"  {GRY}every {interval:g}s · +/- interval · h home · q quit{RST}", ""]

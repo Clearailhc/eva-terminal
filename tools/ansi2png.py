@@ -13,7 +13,8 @@ def x256(n):
     g=8+(n-232)*10; return (g,g,g)
 lines=open(src).read().split('\n')
 W=max(1,max(sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in re.sub(r'\x1b\[[0-9;?]*[A-Za-z]','',l)) for l in lines))
-DEF_FG,DEF_BG=(216,214,224),(28,27,34)
+LIGHT=len(sys.argv)>3 and sys.argv[3]=='light'   # ansi2png.py in.ans out.png [light]
+DEF_FG,DEF_BG=((40,38,46),(250,250,250)) if LIGHT else ((216,214,224),(28,27,34))
 img=Image.new('RGB',((W+2)*CW,(len(lines)+1)*CH),DEF_BG);d=ImageDraw.Draw(img)
 for y,l in enumerate(lines):
     fgc,bgc,b,rev=DEF_FG,None,False,False;x=1

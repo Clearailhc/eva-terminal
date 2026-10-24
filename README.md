@@ -79,6 +79,10 @@ Default: EVA-02 on servers, EVA-00 locally. Every unit ships with an avatar of i
 
 Both pick the largest avatar that fits your terminal width (50 → 26 columns) and drop it on narrow terminals.
 
+**Light and dark terminals.** The banner asks the terminal for its background colour (works over ssh in VTE / GNOME Terminal / Ptyxis, kitty, iTerm2, WezTerm, foot, xterm…). On a light background text turns dark, tracks turn light grey, and every accent is darkened until it reads clearly. If your terminal doesn't answer, it assumes dark — set `EVA_BG=light` in your shell rc.
+
+![EVA-02 on a light terminal](docs/light-server.png)
+
 ## Install
 
 ```bash
@@ -113,6 +117,7 @@ Writes `avatar-{50,44,40,32,26}.ans` for that unit (crop a square around the fac
 |---|---|---|
 | `EVA_UNIT` | saved choice, else `02` server · `00` local | one-off unit override; `eva-unit` saves one |
 | `EVA02_NAME` | short hostname | name in banner, prompt, tmux, tab title |
+| `EVA_BG` | auto | `light` / `dark` — normally detected by asking the terminal for its background (OSC 11) |
 | `EVA02_HOT` | `80` | °C at which a GPU is flagged |
 | `EVA02_TTL` | `10` | seconds the prompt / tmux GPU summary is cached |
 | `EVA_AVATARS` | `~/.local/share/eva-terminal/units` | avatars, one folder per unit |
@@ -144,7 +149,7 @@ EVA 主题的 Linux 终端面板，两种布局，五台机体可选：零号机
 
 机体只改变配色、大标题、驾驶员和台词，不影响显示的数据；告警颜色在所有机体里都一样。`eva-unit` 列出全部机体，`eva-unit 06` 永久切换（选择保存在 `~/.config/eva-terminal/unit`，服务器上 prompt 和 tmux 配色也会跟着变），`EVA_UNIT=01 eva` 只临时看一下。五台机体的效果见上方 [Units](#units)。
 
-纯 Python 标准库实现，不需要 root。
+纯 Python 标准库实现，不需要 root。会自动识别浅色 / 深色终端背景（通过 OSC 11 询问终端，ssh 下也有效）并调整配色；终端不支持时按深色处理，可在 shell rc 里设 `EVA_BG=light`。
 
 ```bash
 EVA02_NAME=h100 server/install.sh user@gpu-server              # 安装到 GPU 服务器
